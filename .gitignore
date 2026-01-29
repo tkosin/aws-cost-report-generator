@@ -1,0 +1,19 @@
+# Generated reports
+*.html
+
+# AWS credentials (never commit these!)
+.aws/
+credentials
+
+# Temporary files
+*.json
+*.tmp
+/tmp/
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
