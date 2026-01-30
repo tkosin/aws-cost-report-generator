@@ -425,11 +425,18 @@ html_content = '''<!DOCTYPE html>
             font-family: 'SF Mono', Monaco, monospace;
             word-break: break-all;
         }
+        .header-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 20px;
+        }
+        .header-left {
+            flex: 1;
+        }
         .toggle-container {
             display: flex;
-            justify-content: center;
             align-items: center;
-            margin: 30px 0;
         }
         .toggle-switch {
             display: inline-flex;
@@ -463,8 +470,19 @@ html_content = '''<!DOCTYPE html>
 </head>
 <body>
     <div class="container">
-        <h1>AWS Cost Report</h1>
-        <p style="color: #86868b; margin-top: 5px;" id="subtitle">$MONTH_NAME • Month-to-Date Analysis</p>
+        <div class="header-row">
+            <div class="header-left">
+                <h1 style="margin: 0;">AWS Cost Report</h1>
+                <p style="color: #86868b; margin: 5px 0 0 0;" id="subtitle">$MONTH_NAME • Month-to-Date Analysis</p>
+                <p style="color: #86868b; margin: 2px 0 0 0; font-size: 13px;" id="dateRange">$START_DATE_MTD to $END_DATE_MTD</p>
+            </div>
+            <div class="toggle-container">
+                <div class="toggle-switch">
+                    <button class="toggle-option active" id="mtdBtn" onclick="toggleView('mtd')">MTD</button>
+                    <button class="toggle-option" id="ytdBtn" onclick="toggleView('ytd')">YTD</button>
+                </div>
+            </div>
+        </div>
         
         <div class="aws-info">
             <h3>📋 AWS Account Information</h3>
@@ -479,13 +497,6 @@ html_content = '''<!DOCTYPE html>
             <div class="info-row">
                 <div class="info-label">Identity (ARN):</div>
                 <div class="info-value">$AWS_IDENTITY</div>
-            </div>
-        </div>
-        
-        <div class="toggle-container">
-            <div class="toggle-switch">
-                <button class="toggle-option active" id="mtdBtn" onclick="toggleView('mtd')">MTD</button>
-                <button class="toggle-option" id="ytdBtn" onclick="toggleView('ytd')">YTD</button>
             </div>
         </div>
         
@@ -617,6 +628,10 @@ html_content += '''                </tbody>
             avgDailyCost: ''' + f"{sum(daily_totals_ytd.values()) / len(dates_ytd):.2f}" + ''',
             servicesCount: ''' + str(len(sorted_services_ytd)) + '''
         };
+        
+        // Date ranges
+        const dateRangeMTD = '$START_DATE_MTD to $END_DATE_MTD';
+        const dateRangeYTD = '$START_DATE_YTD to $END_DATE_YTD';
         
         // Current view
         let currentView = 'mtd';
@@ -760,6 +775,10 @@ html_content += '''                </tbody>
             // Update subtitle
             const subtitle = view === 'mtd' ? '$MONTH_NAME • Month-to-Date Analysis' : '$MONTH_NAME • Year-to-Date Analysis';
             document.getElementById('subtitle').textContent = subtitle;
+            
+            // Update date range
+            const dateRange = view === 'mtd' ? dateRangeMTD : dateRangeYTD;
+            document.getElementById('dateRange').textContent = dateRange;
             
             // Update stats
             const stats = view === 'mtd' ? statsMTD : statsYTD;
