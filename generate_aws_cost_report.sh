@@ -124,6 +124,8 @@ fi
 
 echo "✅ AWS credentials validated"
 AWS_IDENTITY=$(aws sts get-caller-identity --query 'Arn' --output text)
+AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)
+AWS_USER_ID=$(aws sts get-caller-identity --query 'UserId' --output text)
 echo "   Using: $AWS_IDENTITY"
 echo ""
 
@@ -327,12 +329,54 @@ html_content = '''<!DOCTYPE html>
         .cost-high { color: #d32f2f; font-weight: 600; }
         .cost-medium { color: #f57c00; }
         .cost-low { color: #388e3c; }
+        .aws-info {
+            background: #f5f5f7;
+            padding: 15px 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+            font-size: 13px;
+        }
+        .aws-info h3 {
+            margin: 0 0 10px 0;
+            font-size: 14px;
+            color: #1d1d1f;
+        }
+        .aws-info .info-row {
+            display: flex;
+            margin: 5px 0;
+        }
+        .aws-info .info-label {
+            font-weight: 600;
+            color: #515154;
+            min-width: 120px;
+        }
+        .aws-info .info-value {
+            color: #1d1d1f;
+            font-family: 'SF Mono', Monaco, monospace;
+            word-break: break-all;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>AWS Cost Report</h1>
         <p style="color: #86868b; margin-top: 5px;">$MONTH_NAME • Month-to-Date Analysis</p>
+        
+        <div class="aws-info">
+            <h3>📋 AWS Account Information</h3>
+            <div class="info-row">
+                <div class="info-label">Profile:</div>
+                <div class="info-value">''' + ("""${AWS_PROFILE:-default}""") + '''</div>
+            </div>
+            <div class="info-row">
+                <div class="info-label">Account ID:</div>
+                <div class="info-value">$AWS_ACCOUNT_ID</div>
+            </div>
+            <div class="info-row">
+                <div class="info-label">Identity (ARN):</div>
+                <div class="info-value">$AWS_IDENTITY</div>
+            </div>
+        </div>
         
         <div class="summary">
             <div class="summary-card">
