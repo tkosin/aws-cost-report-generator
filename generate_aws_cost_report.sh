@@ -558,8 +558,15 @@ html_content += '''                </tbody>
     </div>
 
     <script>
+        // Helper function to check if date is weekend
+        function isWeekend(dateStr) {
+            const date = new Date(dateStr);
+            const day = date.getDay();
+            return day === 0 || day === 6; // Sunday = 0, Saturday = 6
+        }
+        
         // MTD Data
-        const datesMTD = ''' + json.dumps([d[5:] for d in dates_mtd]) + ''';
+        const datesMTD = ''' + json.dumps(dates_mtd) + ''';
         const topServicesMTD = ''' + json.dumps([
             {
                 'label': service[:40],
@@ -567,6 +574,15 @@ html_content += '''                </tbody>
             }
             for service, costs in sorted_services_mtd[:10]
         ]) + ''';
+        const allServicesMTD = ''' + json.dumps([
+            {
+                'name': service,
+                'costs': {d: costs.get(d, 0) for d in dates_mtd},
+                'total': sum(costs.values())
+            }
+            for service, costs in sorted_services_mtd
+        ]) + ''';
+        const dailyTotalsMTD = ''' + json.dumps(daily_totals_mtd) + ''';
         const statsMTD = {
             totalCost: ''' + f"{sum(sum(costs.values()) for _, costs in sorted_services_mtd):.2f}" + ''',
             topServiceCost: ''' + f"{sum(sorted_services_mtd[0][1].values()):.2f}" + ''',
@@ -575,7 +591,7 @@ html_content += '''                </tbody>
         };
         
         // YTD Data
-        const datesYTD = ''' + json.dumps([d[5:] for d in dates_ytd]) + ''';
+        const datesYTD = ''' + json.dumps(dates_ytd) + ''';
         const topServicesYTD = ''' + json.dumps([
             {
                 'label': service[:40],
@@ -583,6 +599,15 @@ html_content += '''                </tbody>
             }
             for service, costs in sorted_services_ytd[:10]
         ]) + ''';
+        const allServicesYTD = ''' + json.dumps([
+            {
+                'name': service,
+                'costs': {d: costs.get(d, 0) for d in dates_ytd},
+                'total': sum(costs.values())
+            }
+            for service, costs in sorted_services_ytd
+        ]) + ''';
+        const dailyTotalsYTD = ''' + json.dumps(daily_totals_ytd) + ''';
         const statsYTD = {
             totalCost: ''' + f"{sum(sum(costs.values()) for _, costs in sorted_services_ytd):.2f}" + ''',
             topServiceCost: ''' + f"{sum(sorted_services_ytd[0][1].values()):.2f}" + ''',
@@ -672,6 +697,55 @@ html_content += '''                </tbody>
             }
         });
         
+        // Generate table HTML
+        function generateTable(view) {
+            const dates = view === 'mtd' ? datesMTD : datesYTD;
+            const allServices = view === 'mtd' ? allServicesMTD : allServicesYTD;
+            const dailyTotals = view === 'mtd' ? dailyTotalsMTD : dailyTotalsYTD;
+            
+            let tableHTML = '<table><thead><tr><th>Service</th>';
+            
+            // Add date headers
+            dates.forEach(date => {
+                const dateLabel = date.substring(5); // Get MM-DD part
+                const weekendClass = isWeekend(date) ? ' class="weekend"' : '';
+                tableHTML += `<th${weekendClass}>${dateLabel}</th>`;
+            });
+            tableHTML += '<th style="background: #e3e3e5;">Total</th></tr></thead><tbody>';
+            
+            // Add service rows
+            allServices.forEach(service => {
+                tableHTML += '<tr>';
+                const serviceName = service.name.length > 70 ? service.name.substring(0, 70) : service.name;
+                tableHTML += `<td title="${service.name}">${serviceName}</td>`;
+                
+                dates.forEach(date => {
+                    const cost = service.costs[date] || 0;
+                    const costClass = cost > 50 ? 'cost-high' : (cost > 10 ? 'cost-medium' : 'cost-low');
+                    const costStr = cost > 0 ? cost.toFixed(2) : '-';
+                    const weekendClass = isWeekend(date) ? ' weekend' : '';
+                    tableHTML += `<td class="${costClass}${weekendClass}">${costStr}</td>`;
+                });
+                
+                tableHTML += `<td style="font-weight: bold; background: #f5f5f7;">\$${service.total.toFixed(2)}</td>`;
+                tableHTML += '</tr>';
+            });
+            
+            // Add total row
+            tableHTML += '<tr class="total-row"><td>TOTAL</td>';
+            let grandTotal = 0;
+            dates.forEach(date => {
+                const total = dailyTotals[date] || 0;
+                grandTotal += total;
+                const weekendClass = isWeekend(date) ? ' weekend' : '';
+                tableHTML += `<td class="${weekendClass}">\$${total.toFixed(2)}</td>`;
+            });
+            tableHTML += `<td style="background: #e3e3e5;">\$${grandTotal.toFixed(2)}</td>`;
+            tableHTML += '</tr></tbody></table>';
+            
+            return tableHTML;
+        }
+        
         // Toggle function
         function toggleView(view) {
             currentView = view;
@@ -696,7 +770,7 @@ html_content += '''                </tbody>
             const dates = view === 'mtd' ? datesMTD : datesYTD;
             const topServices = view === 'mtd' ? topServicesMTD : topServicesYTD;
             
-            chart.data.labels = dates;
+            chart.data.labels = dates.map(d => d.substring(5));
             chart.data.datasets = topServices.map((service, idx) => ({
                 ...service,
                 backgroundColor: colors[idx],
@@ -705,8 +779,9 @@ html_content += '''                </tbody>
             }));
             chart.update();
             
-            // TODO: Update table (requires regenerating table HTML)
-            alert('Table view toggle coming soon! Chart and summary updated to ' + view.toUpperCase() + ' view.');
+            // Update table
+            const tableWrapper = document.querySelector('.table-wrapper');
+            tableWrapper.innerHTML = generateTable(view);
         }
     </script>
 </body>
