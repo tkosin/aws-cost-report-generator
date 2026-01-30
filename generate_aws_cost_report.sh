@@ -77,25 +77,28 @@ fi
 if [[ -z "$AWS_PROFILE" ]] && [[ -z "$AWS_DEFAULT_PROFILE" ]]; then
     if [[ -f ~/.aws/credentials ]]; then
         # Get list of profiles from credentials file
-        PROFILES=($(grep -E '^\[.*\]$' ~/.aws/credentials | tr -d '[]' | grep -v '^default$'))
+        PROFILES=($(grep -E '^\[.*\]$' ~/.aws/credentials | tr -d '[]'))
         
-        if [[ ${#PROFILES[@]} -gt 0 ]]; then
-            echo "🔍 Found AWS profiles in ~/.aws/credentials:"
-            echo "   - default"
-            for profile in "${PROFILES[@]}"; do
-                echo "   - $profile"
+        if [[ ${#PROFILES[@]} -gt 1 ]]; then
+            echo "🔍 Found AWS profiles in ~/.aws/credentials"
+            echo ""
+            echo "❓ Select AWS profile (use arrow keys):"
+            
+            PS3="Profile: "
+            select selected_profile in "${PROFILES[@]}"; do
+                if [[ -n "$selected_profile" ]]; then
+                    AWS_PROFILE="$selected_profile"
+                    echo ""
+                    echo "✅ Using profile: $AWS_PROFILE"
+                    break
+                else
+                    echo "Invalid selection. Please try again."
+                fi
             done
             echo ""
-            echo "❓ Which profile would you like to use?"
-            echo "   (Press Enter to use 'default', or type profile name)"
-            read -r -p "Profile: " selected_profile
-            
-            if [[ -n "$selected_profile" ]]; then
-                AWS_PROFILE="$selected_profile"
-                echo "✅ Using profile: $AWS_PROFILE"
-            else
-                echo "✅ Using default profile"
-            fi
+        elif [[ ${#PROFILES[@]} -eq 1 ]]; then
+            AWS_PROFILE="${PROFILES[0]}"
+            echo "🔍 Found single AWS profile: $AWS_PROFILE"
             echo ""
         fi
     fi
