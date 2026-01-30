@@ -140,32 +140,55 @@ YEAR=$(echo $YEAR_MONTH | cut -d'-' -f1)
 MONTH=$(echo $YEAR_MONTH | cut -d'-' -f2)
 MONTH_NAME=$(date -j -f "%Y-%m" "$YEAR_MONTH" +"%B %Y" 2>/dev/null || echo "$YEAR_MONTH")
 
-# Calculate date range
-START_DATE="${YEAR_MONTH}-01"
+# Calculate date range for MTD (Month-to-Date)
+START_DATE_MTD="${YEAR_MONTH}-01"
 # Get last day of month
-LAST_DAY=$(date -j -v1d -v+1m -v-1d -f "%Y-%m-%d" "$START_DATE" +%d 2>/dev/null || echo "31")
-END_DATE="${YEAR_MONTH}-${LAST_DAY}"
+LAST_DAY=$(date -j -v1d -v+1m -v-1d -f "%Y-%m-%d" "$START_DATE_MTD" +%d 2>/dev/null || echo "31")
+END_DATE_MTD="${YEAR_MONTH}-${LAST_DAY}"
+
+# Calculate date range for YTD (Year-to-Date)
+START_DATE_YTD="${YEAR}-01-01"
+END_DATE_YTD="${YEAR_MONTH}-${LAST_DAY}"
 
 echo "📊 Generating AWS Cost Report for $MONTH_NAME"
-echo "   Date range: $START_DATE to $END_DATE"
+echo "   MTD range: $START_DATE_MTD to $END_DATE_MTD"
+echo "   YTD range: $START_DATE_YTD to $END_DATE_YTD"
 
-# Fetch cost data from AWS
-TEMP_FILE="/tmp/aws_costs_${YEAR_MONTH}.json"
-echo "🔄 Fetching cost data from AWS..."
+# Fetch MTD cost data from AWS
+TEMP_FILE_MTD="/tmp/aws_costs_mtd_${YEAR_MONTH}.json"
+echo "🔄 Fetching MTD cost data from AWS..."
 
 aws ce get-cost-and-usage \
-    --time-period Start=$START_DATE,End=$END_DATE \
+    --time-period Start=$START_DATE_MTD,End=$END_DATE_MTD \
     --granularity DAILY \
     --metrics "UnblendedCost" \
     --group-by Type=DIMENSION,Key=SERVICE \
-    --output json > "$TEMP_FILE"
+    --output json > "$TEMP_FILE_MTD"
 
-if [ ! -s "$TEMP_FILE" ]; then
-    echo "❌ Error: Failed to fetch AWS cost data"
+if [ ! -s "$TEMP_FILE_MTD" ]; then
+    echo "❌ Error: Failed to fetch MTD AWS cost data"
     exit 1
 fi
 
-echo "✅ Data fetched successfully"
+echo "✅ MTD data fetched successfully"
+
+# Fetch YTD cost data from AWS
+TEMP_FILE_YTD="/tmp/aws_costs_ytd_${YEAR_MONTH}.json"
+echo "🔄 Fetching YTD cost data from AWS..."
+
+aws ce get-cost-and-usage \
+    --time-period Start=$START_DATE_YTD,End=$END_DATE_YTD \
+    --granularity DAILY \
+    --metrics "UnblendedCost" \
+    --group-by Type=DIMENSION,Key=SERVICE \
+    --output json > "$TEMP_FILE_YTD"
+
+if [ ! -s "$TEMP_FILE_YTD" ]; then
+    echo "❌ Error: Failed to fetch YTD AWS cost data"
+    exit 1
+fi
+
+echo "✅ YTD data fetched successfully"
 
 # Generate HTML report
 # Create filename with profile and account ID
@@ -177,40 +200,82 @@ python3 << EOF
 import json
 from datetime import datetime
 
-with open('$TEMP_FILE', 'r') as f:
-    data = json.load(f)
+# Load MTD data
+with open('$TEMP_FILE_MTD', 'r') as f:
+    data_mtd = json.load(f)
 
-# Collect all services and dates
-services = {}
-dates = []
+# Load YTD data
+with open('$TEMP_FILE_YTD', 'r') as f:
+    data_ytd = json.load(f)
 
-for day in data['ResultsByTime']:
+# Process MTD data
+services_mtd = {}
+dates_mtd = []
+
+for day in data_mtd['ResultsByTime']:
     date = day['TimePeriod']['Start']
-    dates.append(date)
+    dates_mtd.append(date)
     
     for group in day['Groups']:
         service = group['Keys'][0]
         cost = float(group['Metrics']['UnblendedCost']['Amount'])
         
-        if service not in services:
-            services[service] = {}
-        services[service][date] = cost
+        if service not in services_mtd:
+            services_mtd[service] = {}
+        services_mtd[service][date] = cost
 
-# Filter out services with zero total cost
-filtered_services = {}
-for service, daily_costs in services.items():
+# Process YTD data
+services_ytd = {}
+dates_ytd = []
+
+for day in data_ytd['ResultsByTime']:
+    date = day['TimePeriod']['Start']
+    dates_ytd.append(date)
+    
+    for group in day['Groups']:
+        service = group['Keys'][0]
+        cost = float(group['Metrics']['UnblendedCost']['Amount'])
+        
+        if service not in services_ytd:
+            services_ytd[service] = {}
+        services_ytd[service][date] = cost
+
+# Filter MTD services with zero total cost
+filtered_services_mtd = {}
+for service, daily_costs in services_mtd.items():
     total = sum(daily_costs.values())
     if total > 0:
-        filtered_services[service] = daily_costs
+        filtered_services_mtd[service] = daily_costs
+
+# Filter YTD services with zero total cost
+filtered_services_ytd = {}
+for service, daily_costs in services_ytd.items():
+    total = sum(daily_costs.values())
+    if total > 0:
+        filtered_services_ytd[service] = daily_costs
 
 # Sort services by total cost (descending)
-sorted_services = sorted(filtered_services.items(), key=lambda x: sum(x[1].values()), reverse=True)
+sorted_services_mtd = sorted(filtered_services_mtd.items(), key=lambda x: sum(x[1].values()), reverse=True)
+sorted_services_ytd = sorted(filtered_services_ytd.items(), key=lambda x: sum(x[1].values()), reverse=True)
 
-# Calculate daily totals
-daily_totals = {}
-for date in dates:
-    daily_total = sum(services[svc].get(date, 0) for svc in filtered_services)
-    daily_totals[date] = daily_total
+# Calculate daily totals for MTD
+daily_totals_mtd = {}
+for date in dates_mtd:
+    daily_total = sum(services_mtd[svc].get(date, 0) for svc in filtered_services_mtd)
+    daily_totals_mtd[date] = daily_total
+
+# Calculate daily totals for YTD
+daily_totals_ytd = {}
+for date in dates_ytd:
+    daily_total = sum(services_ytd[svc].get(date, 0) for svc in filtered_services_ytd)
+    daily_totals_ytd[date] = daily_total
+
+# Use MTD as default
+services = services_mtd
+filtered_services = filtered_services_mtd
+sorted_services = sorted_services_mtd
+dates = dates_mtd
+daily_totals = daily_totals_mtd
 
 # Determine weekends
 def is_weekend(date_str):
@@ -357,12 +422,46 @@ html_content = '''<!DOCTYPE html>
             font-family: 'SF Mono', Monaco, monospace;
             word-break: break-all;
         }
+        .toggle-container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            margin: 30px 0;
+        }
+        .toggle-switch {
+            display: inline-flex;
+            background: #e5e5e7;
+            border-radius: 8px;
+            padding: 4px;
+        }
+        .toggle-option {
+            padding: 10px 24px;
+            border: none;
+            background: transparent;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            color: #515154;
+            border-radius: 6px;
+            transition: all 0.3s ease;
+        }
+        .toggle-option.active {
+            background: white;
+            color: #667eea;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .toggle-option:hover:not(.active) {
+            color: #1d1d1f;
+        }
+        .hidden {
+            display: none;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>AWS Cost Report</h1>
-        <p style="color: #86868b; margin-top: 5px;">$MONTH_NAME • Month-to-Date Analysis</p>
+        <p style="color: #86868b; margin-top: 5px;" id="subtitle">$MONTH_NAME • Month-to-Date Analysis</p>
         
         <div class="aws-info">
             <h3>📋 AWS Account Information</h3>
@@ -380,7 +479,14 @@ html_content = '''<!DOCTYPE html>
             </div>
         </div>
         
-        <div class="summary">
+        <div class="toggle-container">
+            <div class="toggle-switch">
+                <button class="toggle-option active" id="mtdBtn" onclick="toggleView('mtd')">MTD</button>
+                <button class="toggle-option" id="ytdBtn" onclick="toggleView('ytd')">YTD</button>
+            </div>
+        </div>
+        
+        <div class="summary" id="summary">
             <div class="summary-card">
                 <h3>Total Cost</h3>
                 <p>\$''' + f"{sum(sum(costs.values()) for _, costs in sorted_services):.2f}" + '''</p>
@@ -452,18 +558,40 @@ html_content += '''                </tbody>
     </div>
 
     <script>
-        const ctx = document.getElementById('dailyCostChart');
-        
-        const dates = ''' + json.dumps([d[5:] for d in dates]) + ''';
-        
-        // Top 10 services for stacked bar chart
-        const topServices = ''' + json.dumps([
+        // MTD Data
+        const datesMTD = ''' + json.dumps([d[5:] for d in dates_mtd]) + ''';
+        const topServicesMTD = ''' + json.dumps([
             {
                 'label': service[:40],
-                'data': [costs.get(d, 0) for d in dates],
+                'data': [costs.get(d, 0) for d in dates_mtd],
             }
-            for service, costs in sorted_services[:10]
+            for service, costs in sorted_services_mtd[:10]
         ]) + ''';
+        const statsMTD = {
+            totalCost: ''' + f"{sum(sum(costs.values()) for _, costs in sorted_services_mtd):.2f}" + ''',
+            topServiceCost: ''' + f"{sum(sorted_services_mtd[0][1].values()):.2f}" + ''',
+            avgDailyCost: ''' + f"{sum(daily_totals_mtd.values()) / len(dates_mtd):.2f}" + ''',
+            servicesCount: ''' + str(len(sorted_services_mtd)) + '''
+        };
+        
+        // YTD Data
+        const datesYTD = ''' + json.dumps([d[5:] for d in dates_ytd]) + ''';
+        const topServicesYTD = ''' + json.dumps([
+            {
+                'label': service[:40],
+                'data': [costs.get(d, 0) for d in dates_ytd],
+            }
+            for service, costs in sorted_services_ytd[:10]
+        ]) + ''';
+        const statsYTD = {
+            totalCost: ''' + f"{sum(sum(costs.values()) for _, costs in sorted_services_ytd):.2f}" + ''',
+            topServiceCost: ''' + f"{sum(sorted_services_ytd[0][1].values()):.2f}" + ''',
+            avgDailyCost: ''' + f"{sum(daily_totals_ytd.values()) / len(dates_ytd):.2f}" + ''',
+            servicesCount: ''' + str(len(sorted_services_ytd)) + '''
+        };
+        
+        // Current view
+        let currentView = 'mtd';
         
         // Color palette
         const colors = [
@@ -479,11 +607,13 @@ html_content += '''                </tbody>
             'rgba(50, 205, 50, 0.8)'
         ];
         
-        new Chart(ctx, {
+        // Initialize chart
+        const ctx = document.getElementById('dailyCostChart');
+        let chart = new Chart(ctx, {
             type: 'bar',
             data: {
-                labels: dates,
-                datasets: topServices.map((service, idx) => ({
+                labels: datesMTD,
+                datasets: topServicesMTD.map((service, idx) => ({
                     ...service,
                     backgroundColor: colors[idx],
                     borderColor: colors[idx].replace('0.8', '1'),
@@ -541,6 +671,43 @@ html_content += '''                </tbody>
                 }
             }
         });
+        
+        // Toggle function
+        function toggleView(view) {
+            currentView = view;
+            
+            // Update button states
+            document.getElementById('mtdBtn').classList.toggle('active', view === 'mtd');
+            document.getElementById('ytdBtn').classList.toggle('active', view === 'ytd');
+            
+            // Update subtitle
+            const subtitle = view === 'mtd' ? '$MONTH_NAME • Month-to-Date Analysis' : '$MONTH_NAME • Year-to-Date Analysis';
+            document.getElementById('subtitle').textContent = subtitle;
+            
+            // Update stats
+            const stats = view === 'mtd' ? statsMTD : statsYTD;
+            const summaryCards = document.querySelectorAll('.summary-card p');
+            summaryCards[0].textContent = '\$' + stats.totalCost.toFixed(2);
+            summaryCards[1].textContent = '\$' + stats.topServiceCost.toFixed(2);
+            summaryCards[2].textContent = '\$' + stats.avgDailyCost.toFixed(2);
+            summaryCards[3].textContent = stats.servicesCount;
+            
+            // Update chart
+            const dates = view === 'mtd' ? datesMTD : datesYTD;
+            const topServices = view === 'mtd' ? topServicesMTD : topServicesYTD;
+            
+            chart.data.labels = dates;
+            chart.data.datasets = topServices.map((service, idx) => ({
+                ...service,
+                backgroundColor: colors[idx],
+                borderColor: colors[idx].replace('0.8', '1'),
+                borderWidth: 1
+            }));
+            chart.update();
+            
+            // TODO: Update table (requires regenerating table HTML)
+            alert('Table view toggle coming soon! Chart and summary updated to ' + view.toUpperCase() + ' view.');
+        }
     </script>
 </body>
 </html>
@@ -568,4 +735,4 @@ else
 fi
 
 # Cleanup
-rm -f "$TEMP_FILE"
+rm -f "$TEMP_FILE_MTD" "$TEMP_FILE_YTD"
