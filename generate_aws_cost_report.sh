@@ -39,10 +39,27 @@ show_help() {
     exit 0
 }
 
-# Check if help is requested
-if [[ "$1" == "--help" ]] || [[ "$1" == "-h" ]]; then
-    show_help
-fi
+# Parse command line arguments
+AWS_PROFILE=""
+MONTH_ARG=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --help|-h)
+            show_help
+            ;;
+        --profile)
+            AWS_PROFILE="$2"
+            shift 2
+            ;;
+        *)
+            if [[ -z "$MONTH_ARG" ]]; then
+                MONTH_ARG="$1"
+            fi
+            shift
+            ;;
+    esac
+done
 
 # Check prerequisites
 if ! command -v aws &> /dev/null; then
@@ -54,6 +71,40 @@ fi
 if ! command -v python3 &> /dev/null; then
     echo "❌ Error: Python 3 is not installed"
     exit 1
+fi
+
+# If profile not specified, check if user has multiple profiles and ask
+if [[ -z "$AWS_PROFILE" ]] && [[ -z "$AWS_DEFAULT_PROFILE" ]]; then
+    if [[ -f ~/.aws/credentials ]]; then
+        # Get list of profiles from credentials file
+        PROFILES=($(grep -E '^\[.*\]$' ~/.aws/credentials | tr -d '[]' | grep -v '^default$'))
+        
+        if [[ ${#PROFILES[@]} -gt 0 ]]; then
+            echo "🔍 Found AWS profiles in ~/.aws/credentials:"
+            echo "   - default"
+            for profile in "${PROFILES[@]}"; do
+                echo "   - $profile"
+            done
+            echo ""
+            echo "❓ Which profile would you like to use?"
+            echo "   (Press Enter to use 'default', or type profile name)"
+            read -r -p "Profile: " selected_profile
+            
+            if [[ -n "$selected_profile" ]]; then
+                AWS_PROFILE="$selected_profile"
+                echo "✅ Using profile: $AWS_PROFILE"
+            else
+                echo "✅ Using default profile"
+            fi
+            echo ""
+        fi
+    fi
+fi
+
+# Set AWS profile if specified
+if [[ -n "$AWS_PROFILE" ]]; then
+    export AWS_PROFILE
+    echo "🔐 AWS Profile: $AWS_PROFILE"
 fi
 
 # Check AWS credentials
@@ -77,10 +128,10 @@ echo "   Using: $AWS_IDENTITY"
 echo ""
 
 # Determine the month to report
-if [ -z "$1" ]; then
+if [ -z "$MONTH_ARG" ]; then
     YEAR_MONTH=$(date +%Y-%m)
 else
-    YEAR_MONTH=$1
+    YEAR_MONTH=$MONTH_ARG
 fi
 
 YEAR=$(echo $YEAR_MONTH | cut -d'-' -f1)
