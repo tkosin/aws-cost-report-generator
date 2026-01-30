@@ -709,7 +709,7 @@ html_content += '''                </tbody>
             dates.forEach(date => {
                 const dateLabel = date.substring(5); // Get MM-DD part
                 const weekendClass = isWeekend(date) ? ' class="weekend"' : '';
-                tableHTML += `<th${weekendClass}>${dateLabel}</th>`;
+                tableHTML += '<th' + weekendClass + '>' + dateLabel + '</th>';
             });
             tableHTML += '<th style="background: #e3e3e5;">Total</th></tr></thead><tbody>';
             
@@ -717,17 +717,17 @@ html_content += '''                </tbody>
             allServices.forEach(service => {
                 tableHTML += '<tr>';
                 const serviceName = service.name.length > 70 ? service.name.substring(0, 70) : service.name;
-                tableHTML += `<td title="${service.name}">${serviceName}</td>`;
+                tableHTML += '<td title="' + service.name + '">' + serviceName + '</td>';
                 
                 dates.forEach(date => {
                     const cost = service.costs[date] || 0;
                     const costClass = cost > 50 ? 'cost-high' : (cost > 10 ? 'cost-medium' : 'cost-low');
                     const costStr = cost > 0 ? cost.toFixed(2) : '-';
                     const weekendClass = isWeekend(date) ? ' weekend' : '';
-                    tableHTML += `<td class="${costClass}${weekendClass}">${costStr}</td>`;
+                    tableHTML += '<td class="' + costClass + weekendClass + '">' + costStr + '</td>';
                 });
                 
-                tableHTML += `<td style="font-weight: bold; background: #f5f5f7;">\$${service.total.toFixed(2)}</td>`;
+                tableHTML += '<td style="font-weight: bold; background: #f5f5f7;">\$' + service.total.toFixed(2) + '</td>';
                 tableHTML += '</tr>';
             });
             
@@ -738,9 +738,9 @@ html_content += '''                </tbody>
                 const total = dailyTotals[date] || 0;
                 grandTotal += total;
                 const weekendClass = isWeekend(date) ? ' weekend' : '';
-                tableHTML += `<td class="${weekendClass}">\$${total.toFixed(2)}</td>`;
+                tableHTML += '<td class="' + weekendClass + '">\$' + total.toFixed(2) + '</td>';
             });
-            tableHTML += `<td style="background: #e3e3e5;">\$${grandTotal.toFixed(2)}</td>`;
+            tableHTML += '<td style="background: #e3e3e5;">\$' + grandTotal.toFixed(2) + '</td>';
             tableHTML += '</tr></tbody></table>';
             
             return tableHTML;
