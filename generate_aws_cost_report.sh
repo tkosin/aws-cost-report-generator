@@ -82,20 +82,32 @@ if [[ -z "$AWS_PROFILE" ]] && [[ -z "$AWS_DEFAULT_PROFILE" ]]; then
         if [[ ${#PROFILES[@]} -gt 1 ]]; then
             echo "🔍 Found AWS profiles in ~/.aws/credentials"
             echo ""
-            echo "❓ Select AWS profile (use arrow keys):"
             
-            PS3="Profile: "
-            select selected_profile in "${PROFILES[@]}"; do
-                if [[ -n "$selected_profile" ]]; then
-                    AWS_PROFILE="$selected_profile"
-                    echo ""
-                    echo "✅ Using profile: $AWS_PROFILE"
-                    break
-                else
-                    echo "Invalid selection. Please try again."
-                fi
+            # Display profiles with numbers
+            for i in "${!PROFILES[@]}"; do
+                echo "  $((i+1))) ${PROFILES[$i]}"
             done
             echo ""
+            
+            # Get user selection
+            while true; do
+                read -r -p "❓ Select profile (1-${#PROFILES[@]}) or press Enter for default [1]: " selection
+                
+                # Default to 1 if empty
+                if [[ -z "$selection" ]]; then
+                    selection=1
+                fi
+                
+                # Validate input is a number
+                if [[ "$selection" =~ ^[0-9]+$ ]] && [[ "$selection" -ge 1 ]] && [[ "$selection" -le ${#PROFILES[@]} ]]; then
+                    AWS_PROFILE="${PROFILES[$((selection-1))]}"
+                    echo "✅ Using profile: $AWS_PROFILE"
+                    echo ""
+                    break
+                else
+                    echo "❌ Invalid selection. Please enter a number between 1 and ${#PROFILES[@]}."
+                fi
+            done
         elif [[ ${#PROFILES[@]} -eq 1 ]]; then
             AWS_PROFILE="${PROFILES[0]}"
             echo "🔍 Found single AWS profile: $AWS_PROFILE"
