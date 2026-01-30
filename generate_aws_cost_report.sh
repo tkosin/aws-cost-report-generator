@@ -168,7 +168,9 @@ fi
 echo "✅ Data fetched successfully"
 
 # Generate HTML report
-OUTPUT_FILE="$HOME/aws_cost_report_${YEAR_MONTH}.html"
+# Create filename with profile and account ID
+PROFILE_NAME="${AWS_PROFILE:-default}"
+OUTPUT_FILE="$HOME/aws_cost_report_${YEAR_MONTH}_${PROFILE_NAME}-${AWS_ACCOUNT_ID}.html"
 echo "📝 Generating HTML report..."
 
 python3 << EOF
