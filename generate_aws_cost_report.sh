@@ -15,14 +15,16 @@
 #   YYYY-MM   Month to report (default: current month)
 #
 # Options:
-#   --profile PROFILE   AWS profile to use (default: default)
-#   --help              Show this help message
+#   --profile PROFILE          AWS profile to use (default: default)
+#   --profiles PROFILE1,PROFILE2  Multiple AWS profiles (comma-separated)
+#   --help                     Show this help message
 #
 # Examples:
-#   ./generate_aws_cost_report.sh                    # Current month
-#   ./generate_aws_cost_report.sh 2026-01           # January 2026
-#   ./generate_aws_cost_report.sh 2026-01 --profile yodkosin
-#   AWS_PROFILE=prod ./generate_aws_cost_report.sh  # Using environment variable
+#   ./generate_aws_cost_report.sh                              # Current month, interactive profile selection
+#   ./generate_aws_cost_report.sh 2026-01                     # January 2026
+#   ./generate_aws_cost_report.sh 2026-01 --profile yodkosin  # Single profile
+#   ./generate_aws_cost_report.sh --profiles yodkosin,production,dev  # Multiple profiles
+#   AWS_PROFILE=prod ./generate_aws_cost_report.sh            # Using environment variable
 #
 # AWS Credentials:
 #   Script uses standard AWS credential chain:
@@ -40,7 +42,7 @@ show_help() {
 }
 
 # Parse command line arguments
-AWS_PROFILE=""
+AWS_PROFILES=()
 MONTH_ARG=""
 
 while [[ $# -gt 0 ]]; do
@@ -48,8 +50,12 @@ while [[ $# -gt 0 ]]; do
         --help|-h)
             show_help
             ;;
-        --profile)
-            AWS_PROFILE="$2"
+        --profile|--profiles)
+            # Support comma-separated profiles
+            IFS=',' read -ra PROFILES_ARG <<< "$2"
+            for prof in "${PROFILES_ARG[@]}"; do
+                AWS_PROFILES+=("$prof")
+            done
             shift 2
             ;;
         *)
@@ -73,75 +79,112 @@ if ! command -v python3 &> /dev/null; then
     exit 1
 fi
 
-# If profile not specified, check if user has multiple profiles and ask
-if [[ -z "$AWS_PROFILE" ]] && [[ -z "$AWS_DEFAULT_PROFILE" ]]; then
+# If profiles not specified, check if user has multiple profiles and ask
+if [[ ${#AWS_PROFILES[@]} -eq 0 ]] && [[ -z "$AWS_DEFAULT_PROFILE" ]]; then
     if [[ -f ~/.aws/credentials ]]; then
         # Get list of profiles from credentials file
-        PROFILES=($(grep -E '^\[.*\]$' ~/.aws/credentials | tr -d '[]'))
-        
-        if [[ ${#PROFILES[@]} -gt 1 ]]; then
+        AVAILABLE_PROFILES=($(grep -E '^\[.*\]$' ~/.aws/credentials | tr -d '[]'))
+
+        if [[ ${#AVAILABLE_PROFILES[@]} -gt 1 ]]; then
             echo "🔍 Found AWS profiles in ~/.aws/credentials"
             echo ""
-            
+            echo "   Select profiles (comma-separated numbers, e.g., 1,3,4)"
+            echo ""
+
             # Display profiles with numbers
-            for i in "${!PROFILES[@]}"; do
-                echo "  $((i+1))) ${PROFILES[$i]}"
+            for i in "${!AVAILABLE_PROFILES[@]}"; do
+                echo "  $((i+1))) ${AVAILABLE_PROFILES[$i]}"
             done
             echo ""
-            
+
             # Get user selection
             while true; do
-                read -r -p "❓ Select profile (1-${#PROFILES[@]}) or press Enter for default [1]: " selection
-                
+                read -r -p "❓ Select profiles (1-${#AVAILABLE_PROFILES[@]}) or press Enter for default [1]: " selection
+
                 # Default to 1 if empty
                 if [[ -z "$selection" ]]; then
-                    selection=1
+                    selection="1"
                 fi
-                
-                # Validate input is a number
-                if [[ "$selection" =~ ^[0-9]+$ ]] && [[ "$selection" -ge 1 ]] && [[ "$selection" -le ${#PROFILES[@]} ]]; then
-                    AWS_PROFILE="${PROFILES[$((selection-1))]}"
-                    echo "✅ Using profile: $AWS_PROFILE"
+
+                # Parse comma-separated selections
+                IFS=',' read -ra SELECTIONS <<< "$selection"
+                VALID=true
+                TEMP_PROFILES=()
+
+                for sel in "${SELECTIONS[@]}"; do
+                    # Trim whitespace
+                    sel=$(echo "$sel" | xargs)
+
+                    # Validate each selection
+                    if [[ "$sel" =~ ^[0-9]+$ ]] && [[ "$sel" -ge 1 ]] && [[ "$sel" -le ${#AVAILABLE_PROFILES[@]} ]]; then
+                        TEMP_PROFILES+=("${AVAILABLE_PROFILES[$((sel-1))]}")
+                    else
+                        VALID=false
+                        echo "❌ Invalid selection: $sel"
+                        break
+                    fi
+                done
+
+                if [[ "$VALID" == true ]] && [[ ${#TEMP_PROFILES[@]} -gt 0 ]]; then
+                    AWS_PROFILES=("${TEMP_PROFILES[@]}")
+                    echo "✅ Using profile(s): ${AWS_PROFILES[*]}"
                     echo ""
                     break
                 else
-                    echo "❌ Invalid selection. Please enter a number between 1 and ${#PROFILES[@]}."
+                    echo "❌ Invalid selection. Please enter comma-separated numbers between 1 and ${#AVAILABLE_PROFILES[@]}."
                 fi
             done
-        elif [[ ${#PROFILES[@]} -eq 1 ]]; then
-            AWS_PROFILE="${PROFILES[0]}"
-            echo "🔍 Found single AWS profile: $AWS_PROFILE"
+        elif [[ ${#AVAILABLE_PROFILES[@]} -eq 1 ]]; then
+            AWS_PROFILES=("${AVAILABLE_PROFILES[0]}")
+            echo "🔍 Found single AWS profile: ${AWS_PROFILES[0]}"
             echo ""
         fi
     fi
 fi
 
-# Set AWS profile if specified
-if [[ -n "$AWS_PROFILE" ]]; then
-    export AWS_PROFILE
-    echo "🔐 AWS Profile: $AWS_PROFILE"
+# If still no profiles, use default
+if [[ ${#AWS_PROFILES[@]} -eq 0 ]]; then
+    AWS_PROFILES=("default")
 fi
 
-# Check AWS credentials
-if ! aws sts get-caller-identity &> /dev/null; then
-    echo "❌ Error: AWS credentials not configured or invalid"
-    echo ""
-    echo "   Configure credentials:"
-    echo "   1. Run: aws configure"
-    echo "   2. Or set environment variables:"
-    echo "      export AWS_ACCESS_KEY_ID=your_key"
-    echo "      export AWS_SECRET_ACCESS_KEY=your_secret"
-    echo "   3. Or use a profile:"
-    echo "      export AWS_PROFILE=your_profile"
-    echo ""
-    exit 1
-fi
+# Validate AWS credentials for each profile
+echo "🔐 Validating AWS credentials for selected profiles..."
+echo ""
 
-echo "✅ AWS credentials validated"
-AWS_IDENTITY=$(aws sts get-caller-identity --query 'Arn' --output text)
-AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)
-AWS_USER_ID=$(aws sts get-caller-identity --query 'UserId' --output text)
-echo "   Using: $AWS_IDENTITY"
+# Use indexed arrays instead of associative arrays (bash 3.2 compatible)
+PROFILE_IDENTITIES=()
+PROFILE_ACCOUNT_IDS=()
+PROFILE_USER_IDS=()
+
+for profile in "${AWS_PROFILES[@]}"; do
+    echo "   Checking profile: $profile"
+
+    # Set profile for this check
+    export AWS_PROFILE="$profile"
+
+    # Check AWS credentials
+    if ! aws sts get-caller-identity &> /dev/null; then
+        echo "   ❌ Error: AWS credentials not configured or invalid for profile: $profile"
+        echo ""
+        echo "   Configure credentials:"
+        echo "   1. Run: aws configure --profile $profile"
+        echo "   2. Or set environment variables"
+        echo ""
+        exit 1
+    fi
+
+    # Get identity info
+    IDENTITY=$(aws sts get-caller-identity --query 'Arn' --output text)
+    ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)
+    USER_ID=$(aws sts get-caller-identity --query 'UserId' --output text)
+
+    PROFILE_IDENTITIES+=("$IDENTITY")
+    PROFILE_ACCOUNT_IDS+=("$ACCOUNT_ID")
+    PROFILE_USER_IDS+=("$USER_ID")
+
+    echo "   ✅ $profile: $IDENTITY"
+done
+
 echo ""
 
 # Determine the month to report
@@ -168,122 +211,248 @@ END_DATE_YTD="${YEAR_MONTH}-${LAST_DAY}"
 echo "📊 Generating AWS Cost Report for $MONTH_NAME"
 echo "   MTD range: $START_DATE_MTD to $END_DATE_MTD"
 echo "   YTD range: $START_DATE_YTD to $END_DATE_YTD"
+echo ""
 
-# Fetch MTD cost data from AWS
-TEMP_FILE_MTD="/tmp/aws_costs_mtd_${YEAR_MONTH}.json"
-echo "🔄 Fetching MTD cost data from AWS..."
+# Fetch cost data for each profile
+declare -a TEMP_FILES_MTD
+declare -a TEMP_FILES_YTD
 
-aws ce get-cost-and-usage \
-    --time-period Start=$START_DATE_MTD,End=$END_DATE_MTD \
-    --granularity DAILY \
-    --metrics "UnblendedCost" \
-    --group-by Type=DIMENSION,Key=SERVICE \
-    --output json > "$TEMP_FILE_MTD"
+for profile in "${AWS_PROFILES[@]}"; do
+    echo "🔄 Fetching cost data for profile: $profile"
 
-if [ ! -s "$TEMP_FILE_MTD" ]; then
-    echo "❌ Error: Failed to fetch MTD AWS cost data"
-    exit 1
-fi
+    export AWS_PROFILE="$profile"
 
-echo "✅ MTD data fetched successfully"
+    # Fetch MTD cost data
+    TEMP_FILE_MTD="/tmp/aws_costs_mtd_${YEAR_MONTH}_${profile}.json"
+    echo "   Fetching MTD data..."
 
-# Fetch YTD cost data from AWS
-TEMP_FILE_YTD="/tmp/aws_costs_ytd_${YEAR_MONTH}.json"
-echo "🔄 Fetching YTD cost data from AWS..."
+    aws ce get-cost-and-usage \
+        --time-period Start=$START_DATE_MTD,End=$END_DATE_MTD \
+        --granularity DAILY \
+        --metrics "UnblendedCost" \
+        --group-by Type=DIMENSION,Key=SERVICE \
+        --output json > "$TEMP_FILE_MTD"
 
-aws ce get-cost-and-usage \
-    --time-period Start=$START_DATE_YTD,End=$END_DATE_YTD \
-    --granularity DAILY \
-    --metrics "UnblendedCost" \
-    --group-by Type=DIMENSION,Key=SERVICE \
-    --output json > "$TEMP_FILE_YTD"
+    if [ ! -s "$TEMP_FILE_MTD" ]; then
+        echo "   ❌ Error: Failed to fetch MTD AWS cost data for profile: $profile"
+        exit 1
+    fi
 
-if [ ! -s "$TEMP_FILE_YTD" ]; then
-    echo "❌ Error: Failed to fetch YTD AWS cost data"
-    exit 1
-fi
+    TEMP_FILES_MTD+=("$TEMP_FILE_MTD")
+    echo "   ✅ MTD data fetched"
 
-echo "✅ YTD data fetched successfully"
+    # Fetch YTD cost data
+    TEMP_FILE_YTD="/tmp/aws_costs_ytd_${YEAR_MONTH}_${profile}.json"
+    echo "   Fetching YTD data..."
+
+    aws ce get-cost-and-usage \
+        --time-period Start=$START_DATE_YTD,End=$END_DATE_YTD \
+        --granularity DAILY \
+        --metrics "UnblendedCost" \
+        --group-by Type=DIMENSION,Key=SERVICE \
+        --output json > "$TEMP_FILE_YTD"
+
+    if [ ! -s "$TEMP_FILE_YTD" ]; then
+        echo "   ❌ Error: Failed to fetch YTD AWS cost data for profile: $profile"
+        exit 1
+    fi
+
+    TEMP_FILES_YTD+=("$TEMP_FILE_YTD")
+    echo "   ✅ YTD data fetched"
+    echo ""
+done
+
+echo "✅ All cost data fetched successfully"
 
 # Generate HTML report
-# Create filename with profile and account ID
-PROFILE_NAME="${AWS_PROFILE:-default}"
-OUTPUT_FILE="$HOME/aws_cost_report_${YEAR_MONTH}_${PROFILE_NAME}-${AWS_ACCOUNT_ID}.html"
+# Create filename with profiles
+PROFILES_STR=$(IFS='+'; echo "${AWS_PROFILES[*]}")
+ACCOUNT_IDS_STR=$(IFS='+'; echo "${PROFILE_ACCOUNT_IDS[*]}")
+
+OUTPUT_FILE="$HOME/aws_cost_report_${YEAR_MONTH}_${PROFILES_STR}_${ACCOUNT_IDS_STR}.html"
 echo "📝 Generating HTML report..."
+
+# Export profile metadata as environment variables for Python
+for i in "${!AWS_PROFILES[@]}"; do
+    profile="${AWS_PROFILES[$i]}"
+    # Replace hyphens and dots with underscores for valid env var names
+    safe_profile=$(echo "$profile" | sed 's/[-.]/_/g')
+    export "PROFILE_IDENTITY_${safe_profile}=${PROFILE_IDENTITIES[$i]}"
+    export "PROFILE_ACCOUNT_ID_${safe_profile}=${PROFILE_ACCOUNT_IDS[$i]}"
+done
+
+# Pass data to Python via heredoc
+PROFILES_JSON=$(printf '%s\n' "${AWS_PROFILES[@]}" | jq -R . | jq -s .)
+TEMP_FILES_MTD_JSON=$(printf '%s\n' "${TEMP_FILES_MTD[@]}" | jq -R . | jq -s .)
+TEMP_FILES_YTD_JSON=$(printf '%s\n' "${TEMP_FILES_YTD[@]}" | jq -R . | jq -s .)
 
 python3 << EOF
 import json
 from datetime import datetime
+import os
 
-# Load MTD data
-with open('$TEMP_FILE_MTD', 'r') as f:
-    data_mtd = json.load(f)
+# Parse profiles and file paths from environment/arguments
+profiles = ${PROFILES_JSON}
+temp_files_mtd = ${TEMP_FILES_MTD_JSON}
+temp_files_ytd = ${TEMP_FILES_YTD_JSON}
 
-# Load YTD data
-with open('$TEMP_FILE_YTD', 'r') as f:
-    data_ytd = json.load(f)
+# Load profile metadata
+profile_identities = {}
+profile_account_ids = {}
 
-# Process MTD data
-services_mtd = {}
-dates_mtd = []
+for profile in profiles:
+    # Replace hyphens and dots with underscores to match env var names
+    safe_profile = profile.replace('-', '__').replace('.', '__')
+    profile_identities[profile] = os.environ.get(f'PROFILE_IDENTITY_{safe_profile}', '')
+    profile_account_ids[profile] = os.environ.get(f'PROFILE_ACCOUNT_ID_{safe_profile}', '')
 
-for day in data_mtd['ResultsByTime']:
-    date = day['TimePeriod']['Start']
-    dates_mtd.append(date)
-    
-    for group in day['Groups']:
-        service = group['Keys'][0]
-        cost = float(group['Metrics']['UnblendedCost']['Amount'])
-        
-        if service not in services_mtd:
-            services_mtd[service] = {}
-        services_mtd[service][date] = cost
+# Storage for all profile data
+all_profiles_data_mtd = {}
+all_profiles_data_ytd = {}
 
-# Process YTD data
-services_ytd = {}
-dates_ytd = []
+# Load and process data for each profile
+for idx, profile in enumerate(profiles):
+    # Load MTD data
+    with open(temp_files_mtd[idx], 'r') as f:
+        data_mtd = json.load(f)
 
-for day in data_ytd['ResultsByTime']:
-    date = day['TimePeriod']['Start']
-    dates_ytd.append(date)
-    
-    for group in day['Groups']:
-        service = group['Keys'][0]
-        cost = float(group['Metrics']['UnblendedCost']['Amount'])
-        
-        if service not in services_ytd:
-            services_ytd[service] = {}
-        services_ytd[service][date] = cost
+    # Load YTD data
+    with open(temp_files_ytd[idx], 'r') as f:
+        data_ytd = json.load(f)
 
-# Filter MTD services with zero total cost
-filtered_services_mtd = {}
-for service, daily_costs in services_mtd.items():
-    total = sum(daily_costs.values())
-    if total > 0:
-        filtered_services_mtd[service] = daily_costs
+    # Process MTD data for this profile
+    services_mtd = {}
+    dates_mtd = []
 
-# Filter YTD services with zero total cost
-filtered_services_ytd = {}
-for service, daily_costs in services_ytd.items():
-    total = sum(daily_costs.values())
-    if total > 0:
-        filtered_services_ytd[service] = daily_costs
+    for day in data_mtd['ResultsByTime']:
+        date = day['TimePeriod']['Start']
+        if date not in dates_mtd:
+            dates_mtd.append(date)
 
-# Sort services by total cost (descending)
-sorted_services_mtd = sorted(filtered_services_mtd.items(), key=lambda x: sum(x[1].values()), reverse=True)
-sorted_services_ytd = sorted(filtered_services_ytd.items(), key=lambda x: sum(x[1].values()), reverse=True)
+        for group in day['Groups']:
+            service = group['Keys'][0]
+            cost = float(group['Metrics']['UnblendedCost']['Amount'])
 
-# Calculate daily totals for MTD
-daily_totals_mtd = {}
-for date in dates_mtd:
-    daily_total = sum(services_mtd[svc].get(date, 0) for svc in filtered_services_mtd)
-    daily_totals_mtd[date] = daily_total
+            if service not in services_mtd:
+                services_mtd[service] = {}
+            services_mtd[service][date] = cost
 
-# Calculate daily totals for YTD
-daily_totals_ytd = {}
-for date in dates_ytd:
-    daily_total = sum(services_ytd[svc].get(date, 0) for svc in filtered_services_ytd)
-    daily_totals_ytd[date] = daily_total
+    all_profiles_data_mtd[profile] = {
+        'services': services_mtd,
+        'dates': dates_mtd
+    }
+
+    # Process YTD data for this profile
+    services_ytd = {}
+    dates_ytd = []
+
+    for day in data_ytd['ResultsByTime']:
+        date = day['TimePeriod']['Start']
+        if date not in dates_ytd:
+            dates_ytd.append(date)
+
+        for group in day['Groups']:
+            service = group['Keys'][0]
+            cost = float(group['Metrics']['UnblendedCost']['Amount'])
+
+            if service not in services_ytd:
+                services_ytd[service] = {}
+            services_ytd[service][date] = cost
+
+    all_profiles_data_ytd[profile] = {
+        'services': services_ytd,
+        'dates': dates_ytd
+    }
+
+# Use dates from first profile (they should be the same)
+dates_mtd = all_profiles_data_mtd[profiles[0]]['dates']
+dates_ytd = all_profiles_data_ytd[profiles[0]]['dates']
+
+# Create combined data (sum across all profiles)
+services_mtd_combined = {}
+services_ytd_combined = {}
+
+for profile in profiles:
+    for service, costs in all_profiles_data_mtd[profile]['services'].items():
+        if service not in services_mtd_combined:
+            services_mtd_combined[service] = {}
+        for date, cost in costs.items():
+            services_mtd_combined[service][date] = services_mtd_combined[service].get(date, 0) + cost
+
+for profile in profiles:
+    for service, costs in all_profiles_data_ytd[profile]['services'].items():
+        if service not in services_ytd_combined:
+            services_ytd_combined[service] = {}
+        for date, cost in costs.items():
+            services_ytd_combined[service][date] = services_ytd_combined[service].get(date, 0) + cost
+
+# For backward compatibility, set default data to combined
+services_mtd = services_mtd_combined
+services_ytd = services_ytd_combined
+
+# Prepare data for each profile and combined
+profile_data_output = {}
+
+# Process combined data
+def process_profile_data(services_mtd, services_ytd, dates_mtd, dates_ytd, profile_name):
+    # Filter MTD services
+    filtered_services_mtd = {svc: costs for svc, costs in services_mtd.items() if sum(costs.values()) > 0}
+
+    # Filter YTD services
+    filtered_services_ytd = {svc: costs for svc, costs in services_ytd.items() if sum(costs.values()) > 0}
+
+    # Sort services
+    sorted_services_mtd = sorted(filtered_services_mtd.items(), key=lambda x: sum(x[1].values()), reverse=True)
+    sorted_services_ytd = sorted(filtered_services_ytd.items(), key=lambda x: sum(x[1].values()), reverse=True)
+
+    # Calculate daily totals for MTD
+    daily_totals_mtd = {}
+    for date in dates_mtd:
+        daily_totals_mtd[date] = sum(services_mtd.get(svc, {}).get(date, 0) for svc in filtered_services_mtd)
+
+    # Calculate daily totals for YTD
+    daily_totals_ytd = {}
+    for date in dates_ytd:
+        daily_totals_ytd[date] = sum(services_ytd.get(svc, {}).get(date, 0) for svc in filtered_services_ytd)
+
+    return {
+        'services_mtd': services_mtd,
+        'services_ytd': services_ytd,
+        'filtered_services_mtd': filtered_services_mtd,
+        'filtered_services_ytd': filtered_services_ytd,
+        'sorted_services_mtd': sorted_services_mtd,
+        'sorted_services_ytd': sorted_services_ytd,
+        'daily_totals_mtd': daily_totals_mtd,
+        'daily_totals_ytd': daily_totals_ytd,
+        'dates_mtd': dates_mtd,
+        'dates_ytd': dates_ytd
+    }
+
+# Process combined data
+profile_data_output['combined'] = process_profile_data(
+    services_mtd_combined, services_ytd_combined, dates_mtd, dates_ytd, 'combined'
+)
+
+# Process individual profile data
+for profile in profiles:
+    profile_data_output[profile] = process_profile_data(
+        all_profiles_data_mtd[profile]['services'],
+        all_profiles_data_ytd[profile]['services'],
+        all_profiles_data_mtd[profile]['dates'],
+        all_profiles_data_ytd[profile]['dates'],
+        profile
+    )
+
+# Use combined as default for rendering
+current_data = profile_data_output['combined']
+services_mtd = current_data['services_mtd']
+services_ytd = current_data['services_ytd']
+filtered_services_mtd = current_data['filtered_services_mtd']
+filtered_services_ytd = current_data['filtered_services_ytd']
+sorted_services_mtd = current_data['sorted_services_mtd']
+sorted_services_ytd = current_data['sorted_services_ytd']
+daily_totals_mtd = current_data['daily_totals_mtd']
+daily_totals_ytd = current_data['daily_totals_ytd']
 
 # Use MTD as default
 services = services_mtd
@@ -306,49 +475,64 @@ html_content = '''<!DOCTYPE html>
     <title>AWS Cost Report - $MONTH_NAME</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <style>
+        @import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&display=swap');
+
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+            font-family: 'Amazon Ember', 'Open Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
             margin: 0;
             padding: 20px;
-            background: #f5f5f7;
+            background: #eaeded;
+            color: #16191f;
         }
         .container {
             max-width: 1400px;
             margin: 0 auto;
             background: white;
             padding: 30px;
-            border-radius: 12px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            border-radius: 2px;
+            box-shadow: 0 1px 1px 0 rgba(0,28,36,0.3), 1px 1px 1px 0 rgba(0,28,36,0.15), -1px 1px 1px 0 rgba(0,28,36,0.15);
         }
         h1 {
-            color: #1d1d1f;
+            color: #232F3E;
             margin-bottom: 10px;
+            font-weight: 700;
+            font-size: 28px;
         }
         .summary {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 20px;
+            gap: 16px;
             margin: 20px 0 40px 0;
         }
         .summary-card {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
+            background: white;
+            border: 2px solid #FF9900;
+            color: #232F3E;
             padding: 20px;
-            border-radius: 8px;
+            border-radius: 2px;
+            box-shadow: 0 1px 1px rgba(0,28,36,0.1);
         }
         .summary-card h3 {
-            margin: 0 0 5px 0;
+            margin: 0 0 8px 0;
             font-size: 14px;
-            opacity: 0.9;
+            font-weight: 600;
+            color: #545b64;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
         }
         .summary-card p {
             margin: 0;
-            font-size: 28px;
-            font-weight: bold;
+            font-size: 32px;
+            font-weight: 700;
+            color: #FF9900;
         }
         .chart-container {
             margin: 40px 0;
             height: 500px;
+            background: white;
+            padding: 20px;
+            border-radius: 2px;
+            border: 1px solid #d5dbdb;
         }
         table {
             width: 100%;
@@ -357,84 +541,98 @@ html_content = '''<!DOCTYPE html>
             font-size: 13px;
         }
         th, td {
-            padding: 10px 8px;
+            padding: 12px 10px;
             text-align: right;
-            border-bottom: 1px solid #e5e5e7;
+            border-bottom: 1px solid #d5dbdb;
         }
         th:first-child, td:first-child {
             text-align: left;
             position: sticky;
             left: 0;
             background: white;
-            font-weight: 500;
+            font-weight: 600;
             max-width: 300px;
         }
         th {
-            background: #f5f5f7;
-            font-weight: 600;
+            background: #fafafa;
+            font-weight: 700;
             position: sticky;
             top: 0;
             z-index: 10;
+            color: #232F3E;
+            text-transform: uppercase;
+            font-size: 12px;
+            letter-spacing: 0.5px;
+            border-bottom: 2px solid #FF9900;
         }
         th.weekend {
-            background: #e3f2fd;
-            color: #1976d2;
+            background: #e7f6fd;
+            color: #0972d3;
         }
         td.weekend {
-            background: #f1f8ff;
+            background: #f1f9fe;
         }
         tbody tr:hover td:not(:first-child) {
-            background: #fff9e6;
+            background: #fff8e6;
         }
         tbody tr:hover td.weekend {
-            background: #e3f2fd;
+            background: #e7f6fd;
         }
         tbody tr:hover td:first-child {
             background: #fafafa;
         }
         .total-row {
             font-weight: bold;
+            border-top: 2px solid #FF9900;
         }
         .total-row td:first-child {
-            background: #f0f0f2 !important;
+            background: #232F3E !important;
+            color: white;
         }
         .total-row td {
-            background: #f0f0f2;
+            background: #232F3E;
+            color: white;
+            font-weight: 700;
         }
         .total-row td.weekend {
-            background: #d1e7fd !important;
+            background: #16191f !important;
         }
         .table-wrapper {
             overflow-x: auto;
             margin-top: 20px;
+            border: 1px solid #d5dbdb;
+            border-radius: 2px;
         }
-        .cost-high { color: #d32f2f; font-weight: 600; }
-        .cost-medium { color: #f57c00; }
-        .cost-low { color: #388e3c; }
+        .cost-high { color: #d13212; font-weight: 700; }
+        .cost-medium { color: #ec7211; font-weight: 600; }
+        .cost-low { color: #037f0c; }
         .aws-info {
-            background: #f5f5f7;
-            padding: 15px 20px;
-            border-radius: 8px;
+            background: #f9f9f9;
+            padding: 20px;
+            border-radius: 2px;
             margin: 20px 0;
-            font-size: 13px;
+            font-size: 14px;
+            border-left: 4px solid #FF9900;
+            border: 1px solid #d5dbdb;
         }
         .aws-info h3 {
-            margin: 0 0 10px 0;
-            font-size: 14px;
-            color: #1d1d1f;
+            margin: 0 0 15px 0;
+            font-size: 16px;
+            color: #232F3E;
+            font-weight: 700;
         }
         .aws-info .info-row {
             display: flex;
-            margin: 5px 0;
+            margin: 8px 0;
         }
         .aws-info .info-label {
             font-weight: 600;
-            color: #515154;
-            min-width: 120px;
+            color: #545b64;
+            min-width: 140px;
         }
         .aws-info .info-value {
-            color: #1d1d1f;
-            font-family: 'SF Mono', Monaco, monospace;
+            color: #16191f;
+            font-family: 'Courier New', Monaco, monospace;
             word-break: break-all;
         }
         .header-row {
@@ -449,34 +647,69 @@ html_content = '''<!DOCTYPE html>
         .toggle-container {
             display: flex;
             align-items: center;
+            gap: 12px;
+        }
+        .profile-tabs {
+            display: inline-flex;
+            background: white;
+            border: 2px solid #d5dbdb;
+            border-radius: 2px;
+            padding: 2px;
+        }
+        .profile-tab {
+            padding: 8px 16px;
+            border: none;
+            background: transparent;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 600;
+            color: #545b64;
+            border-radius: 0;
+            transition: all 0.15s ease;
+            white-space: nowrap;
+        }
+        .profile-tab.active {
+            background: #0972d3;
+            color: white;
+        }
+        .profile-tab:hover:not(.active) {
+            background: #fafafa;
+            color: #232F3E;
         }
         .toggle-switch {
             display: inline-flex;
-            background: #e5e5e7;
-            border-radius: 8px;
-            padding: 4px;
+            background: white;
+            border: 2px solid #d5dbdb;
+            border-radius: 2px;
+            padding: 2px;
         }
         .toggle-option {
-            padding: 10px 24px;
+            padding: 8px 20px;
             border: none;
             background: transparent;
             cursor: pointer;
             font-size: 14px;
             font-weight: 600;
-            color: #515154;
-            border-radius: 6px;
-            transition: all 0.3s ease;
+            color: #545b64;
+            border-radius: 0;
+            transition: all 0.15s ease;
         }
         .toggle-option.active {
-            background: white;
-            color: #667eea;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            background: #FF9900;
+            color: white;
         }
         .toggle-option:hover:not(.active) {
-            color: #1d1d1f;
+            background: #fafafa;
+            color: #232F3E;
         }
         .hidden {
             display: none;
+        }
+        h2 {
+            color: #232F3E;
+            font-size: 20px;
+            font-weight: 700;
+            margin-top: 50px;
         }
     </style>
 </head>
@@ -485,30 +718,34 @@ html_content = '''<!DOCTYPE html>
         <div class="header-row">
             <div class="header-left">
                 <h1 style="margin: 0;">AWS Cost Report</h1>
-                <p style="color: #86868b; margin: 5px 0 0 0;" id="subtitle">$MONTH_NAME • Month-to-Date Analysis</p>
-                <p style="color: #86868b; margin: 2px 0 0 0; font-size: 13px;" id="dateRange">$START_DATE_MTD to $END_DATE_MTD</p>
+                <p style="color: #545b64; margin: 8px 0 0 0; font-size: 16px; font-weight: 600;" id="subtitle">$MONTH_NAME • Month-to-Date Analysis</p>
+                <p style="color: #687078; margin: 4px 0 0 0; font-size: 14px;" id="dateRange">$START_DATE_MTD to $END_DATE_MTD</p>
             </div>
-            <div class="toggle-container">
+            <div class="toggle-container">'''
+
+# Add profile tabs if multiple profiles
+if len(profiles) > 1:
+    html_content += '''
+                <div class="profile-tabs">
+                    <button class="profile-tab active" id="profileBtn_combined" onclick="switchProfile('combined')">Combined</button>'''
+    for profile in profiles:
+        html_content += f'''
+                    <button class="profile-tab" id="profileBtn_{profile}" onclick="switchProfile('{profile}')">{profile}</button>'''
+    html_content += '''
+                </div>'''
+
+html_content += '''
                 <div class="toggle-switch">
                     <button class="toggle-option active" id="mtdBtn" onclick="toggleView('mtd')">MTD</button>
                     <button class="toggle-option" id="ytdBtn" onclick="toggleView('ytd')">YTD</button>
                 </div>
             </div>
         </div>
-        
-        <div class="aws-info">
-            <h3>📋 AWS Account Information</h3>
-            <div class="info-row">
-                <div class="info-label">Profile:</div>
-                <div class="info-value">''' + ("""${AWS_PROFILE:-default}""") + '''</div>
-            </div>
-            <div class="info-row">
-                <div class="info-label">Account ID:</div>
-                <div class="info-value">$AWS_ACCOUNT_ID</div>
-            </div>
-            <div class="info-row">
-                <div class="info-label">Identity (ARN):</div>
-                <div class="info-value">$AWS_IDENTITY</div>
+
+        <div class="aws-info" id="awsInfo">
+            <h3>🔐 AWS Account Information</h3>
+            <div id="awsInfoContent">
+                <!-- Will be populated by JavaScript -->
             </div>
         </div>
         
@@ -517,17 +754,17 @@ html_content = '''<!DOCTYPE html>
                 <h3>Total Cost</h3>
                 <p>\$''' + f"{sum(sum(costs.values()) for _, costs in sorted_services):.2f}" + '''</p>
             </div>
-            <div class="summary-card" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">
+            <div class="summary-card" style="border-color: #0972d3;">
                 <h3>Top Service</h3>
-                <p>\$''' + f"{sum(sorted_services[0][1].values()):.2f}" + '''</p>
+                <p style="color: #0972d3;">\$''' + f"{sum(sorted_services[0][1].values()):.2f}" + '''</p>
             </div>
-            <div class="summary-card" style="background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);">
+            <div class="summary-card" style="border-color: #037f0c;">
                 <h3>Avg Daily Cost</h3>
-                <p>\$''' + f"{sum(daily_totals.values()) / len(dates):.2f}" + '''</p>
+                <p style="color: #037f0c;">\$''' + f"{sum(daily_totals.values()) / len(dates):.2f}" + '''</p>
             </div>
-            <div class="summary-card" style="background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);">
+            <div class="summary-card" style="border-color: #232F3E;">
                 <h3>Services</h3>
-                <p>''' + str(len(sorted_services)) + '''</p>
+                <p style="color: #232F3E;">''' + str(len(sorted_services)) + '''</p>
             </div>
         </div>
 
@@ -539,43 +776,104 @@ html_content = '''<!DOCTYPE html>
         <div class="table-wrapper">
             <table>
                 <thead>
-                    <tr>
-                        <th>Service</th>
 '''
 
-# Add date headers with weekend styling
+# Add date headers with 2 rows: month names (weekly) and dates
+# Group dates by month with monthly totals
+from collections import OrderedDict
+months_data = OrderedDict()
 for date in dates:
-    weekend_class = ' class="weekend"' if is_weekend(date) else ''
-    html_content += f'                        <th{weekend_class}>{date[5:]}</th>\\n'
-html_content += '                        <th style="background: #e3e3e5;">Total</th>\\n'
+    year_month = date[:7]  # YYYY-MM
+    month_name = datetime.strptime(date, '%Y-%m-%d').strftime('%b %Y')  # e.g., "Jan 2026"
+    if year_month not in months_data:
+        months_data[year_month] = {'name': month_name, 'dates': [], 'total_costs': {}}
+    months_data[year_month]['dates'].append(date)
+
+# Calculate monthly totals for each service
+for year_month in months_data:
+    month_dates = months_data[year_month]['dates']
+    for service, costs in services.items():
+        month_total = sum(costs.get(d, 0) for d in month_dates)
+        if service not in months_data[year_month]['total_costs']:
+            months_data[year_month]['total_costs'][service] = month_total
+
+# Create header: Add month name every week
+html_content += '                    <tr>\\n'
+html_content += '                        <th rowspan="2" style="background: #fafafa; vertical-align: middle;">Service</th>\\n'
+for year_month, month_info in months_data.items():
+    month_dates = month_info['dates']
+    month_name = month_info['name']
+
+    # Show month name every 7 days
+    for i, date in enumerate(month_dates):
+        if i % 7 == 0:
+            remaining_days = min(7, len(month_dates) - i)
+            html_content += f'                        <th colspan="{remaining_days}" style="background: #232F3E; color: #FF9900; border-bottom: 1px solid #FF9900; font-size: 11px;">{month_name}</th>\\n'
+
+    # Add month total column
+    html_content += f'                        <th rowspan="2" style="background: #FF9900; color: white; vertical-align: middle; font-size: 11px;">{month_name.split()[0]}<br/>Total</th>\\n'
+
+html_content += '                        <th rowspan="2" style="background: #232F3E; color: white; vertical-align: middle;">Grand<br/>Total</th>\\n'
+html_content += '                    </tr>\\n'
+html_content += '                    <tr>\\n'
+
+# Add date row (day numbers)
+for year_month, month_info in months_data.items():
+    for date in month_info['dates']:
+        weekend_class = ' class="weekend"' if is_weekend(date) else ''
+        day_only = date[8:]  # Get just the day (DD)
+        html_content += f'                        <th{weekend_class} style="font-size: 11px;">{day_only}</th>\\n'
+
 html_content += '''                    </tr>
                 </thead>
                 <tbody>
 '''
 
-# Add ALL service rows with weekend styling
+# Add ALL service rows with weekend styling and month totals
 for service, costs in sorted_services:
     total = sum(costs.values())
     html_content += f'                    <tr>\\n'
     html_content += f'                        <td title="{service}">{service[:70]}</td>\\n'
-    
-    for date in dates:
-        cost = costs.get(date, 0)
-        cost_class = 'cost-high' if cost > 50 else ('cost-medium' if cost > 10 else 'cost-low')
-        cost_str = f'{cost:.2f}' if cost > 0 else '-'
-        weekend_class = ' weekend' if is_weekend(date) else ''
-        html_content += f'                        <td class="{cost_class}{weekend_class}">{cost_str}</td>\\n'
-    
-    html_content += f'                        <td style="font-weight: bold; background: #f5f5f7;">\${total:.2f}</td>\\n'
+
+    # Add daily costs grouped by month with month totals
+    for year_month, month_info in months_data.items():
+        month_dates = month_info['dates']
+        month_total = months_data[year_month]['total_costs'].get(service, 0)
+
+        # Daily costs for this month
+        for date in month_dates:
+            cost = costs.get(date, 0)
+            cost_class = 'cost-high' if cost > 50 else ('cost-medium' if cost > 10 else 'cost-low')
+            cost_str = f'{cost:.2f}' if cost > 0 else '-'
+            weekend_class = ' weekend' if is_weekend(date) else ''
+            html_content += f'                        <td class="{cost_class}{weekend_class}">{cost_str}</td>\\n'
+
+        # Month total cell
+        html_content += f'                        <td style="font-weight: bold; background: #fff8e6; color: #232F3E; border-left: 2px solid #FF9900;">\${month_total:.2f}</td>\\n'
+
+    # Grand total cell
+    html_content += f'                        <td style="font-weight: bold; background: #fafafa; color: #232F3E; border-left: 2px solid #232F3E;">\${total:.2f}</td>\\n'
     html_content += f'                    </tr>\\n'
 
-# Add total row with weekend styling
+# Add total row with weekend styling and month totals
 html_content += '                    <tr class="total-row">\\n'
 html_content += '                        <td>TOTAL</td>\\n'
-for date in dates:
-    weekend_class = ' weekend' if is_weekend(date) else ''
-    html_content += f'                        <td class="{weekend_class}">\${daily_totals[date]:.2f}</td>\\n'
-html_content += f'                        <td style="background: #e3e3e5;">\${sum(daily_totals.values()):.2f}</td>\\n'
+
+# Add daily totals grouped by month with month totals
+for year_month, month_info in months_data.items():
+    month_dates = month_info['dates']
+    month_total = sum(daily_totals.get(d, 0) for d in month_dates)
+
+    # Daily totals for this month
+    for date in month_dates:
+        weekend_class = ' weekend' if is_weekend(date) else ''
+        html_content += f'                        <td class="{weekend_class}">\${daily_totals[date]:.2f}</td>\\n'
+
+    # Month total cell
+    html_content += f'                        <td style="background: #FF9900; color: white; font-weight: 700; border-left: 2px solid white;">\${month_total:.2f}</td>\\n'
+
+# Grand total cell
+html_content += f'                        <td style="background: #232F3E; color: white; font-weight: 700; border-left: 2px solid white;">\${sum(daily_totals.values()):.2f}</td>\\n'
 html_content += '                    </tr>\\n'
 
 html_content += '''                </tbody>
@@ -590,88 +888,115 @@ html_content += '''                </tbody>
             const day = date.getDay();
             return day === 0 || day === 6; // Sunday = 0, Saturday = 6
         }
-        
-        // MTD Data
-        const datesMTD = ''' + json.dumps(dates_mtd) + ''';
-        const topServicesMTD = ''' + json.dumps([
-            {
-                'label': service[:40],
-                'data': [costs.get(d, 0) for d in dates_mtd],
-            }
-            for service, costs in sorted_services_mtd[:10]
-        ]) + ''';
-        const allServicesMTD = ''' + json.dumps([
-            {
-                'name': service,
-                'costs': {d: costs.get(d, 0) for d in dates_mtd},
-                'total': sum(costs.values())
-            }
-            for service, costs in sorted_services_mtd
-        ]) + ''';
-        const dailyTotalsMTD = ''' + json.dumps(daily_totals_mtd) + ''';
-        const statsMTD = {
-            totalCost: ''' + f"{sum(sum(costs.values()) for _, costs in sorted_services_mtd):.2f}" + ''',
-            topServiceCost: ''' + f"{sum(sorted_services_mtd[0][1].values()):.2f}" + ''',
-            avgDailyCost: ''' + f"{sum(daily_totals_mtd.values()) / len(dates_mtd):.2f}" + ''',
-            servicesCount: ''' + str(len(sorted_services_mtd)) + '''
-        };
-        
-        // YTD Data
-        const datesYTD = ''' + json.dumps(dates_ytd) + ''';
-        const topServicesYTD = ''' + json.dumps([
-            {
-                'label': service[:40],
-                'data': [costs.get(d, 0) for d in dates_ytd],
-            }
-            for service, costs in sorted_services_ytd[:10]
-        ]) + ''';
-        const allServicesYTD = ''' + json.dumps([
-            {
-                'name': service,
-                'costs': {d: costs.get(d, 0) for d in dates_ytd},
-                'total': sum(costs.values())
-            }
-            for service, costs in sorted_services_ytd
-        ]) + ''';
-        const dailyTotalsYTD = ''' + json.dumps(daily_totals_ytd) + ''';
-        const statsYTD = {
-            totalCost: ''' + f"{sum(sum(costs.values()) for _, costs in sorted_services_ytd):.2f}" + ''',
-            topServiceCost: ''' + f"{sum(sorted_services_ytd[0][1].values()):.2f}" + ''',
-            avgDailyCost: ''' + f"{sum(daily_totals_ytd.values()) / len(dates_ytd):.2f}" + ''',
-            servicesCount: ''' + str(len(sorted_services_ytd)) + '''
-        };
-        
+
+        // Profiles configuration
+        const profiles = ''' + json.dumps(profiles) + ''';
+        const profileMetadata = ''' + json.dumps({
+            profile: {
+                'identity': profile_identities[profile],
+                'account_id': profile_account_ids[profile]
+            } for profile in profiles
+        }) + ''';
+
+        // Profile data - prepare JavaScript data structure
+        const allProfilesData = {};
+'''
+
+# Export all profile data to JavaScript
+for profile_key in ['combined'] + profiles:
+    if profile_key in profile_data_output:
+        pdata = profile_data_output[profile_key]
+
+        # Prepare MTD data
+        html_content += f'''
+        allProfilesData['{profile_key}'] = {{
+            mtd: {{
+                dates: {json.dumps(pdata['dates_mtd'])},
+                topServices: {json.dumps([
+                    {
+                        'label': service[:40],
+                        'data': [costs.get(d, 0) for d in pdata['dates_mtd']],
+                    }
+                    for service, costs in pdata['sorted_services_mtd'][:10]
+                ])},
+                allServices: {json.dumps([
+                    {
+                        'name': service,
+                        'costs': {d: costs.get(d, 0) for d in pdata['dates_mtd']},
+                        'total': sum(costs.values())
+                    }
+                    for service, costs in pdata['sorted_services_mtd']
+                ])},
+                dailyTotals: {json.dumps(pdata['daily_totals_mtd'])},
+                stats: {{
+                    totalCost: {sum(sum(costs.values()) for _, costs in pdata['sorted_services_mtd']) if pdata['sorted_services_mtd'] else 0:.2f},
+                    topServiceCost: {sum(pdata['sorted_services_mtd'][0][1].values()) if pdata['sorted_services_mtd'] else 0:.2f},
+                    avgDailyCost: {sum(pdata['daily_totals_mtd'].values()) / len(pdata['dates_mtd']) if pdata['dates_mtd'] else 0:.2f},
+                    servicesCount: {len(pdata['sorted_services_mtd'])}
+                }}
+            }},
+            ytd: {{
+                dates: {json.dumps(pdata['dates_ytd'])},
+                topServices: {json.dumps([
+                    {
+                        'label': service[:40],
+                        'data': [costs.get(d, 0) for d in pdata['dates_ytd']],
+                    }
+                    for service, costs in pdata['sorted_services_ytd'][:10]
+                ])},
+                allServices: {json.dumps([
+                    {
+                        'name': service,
+                        'costs': {d: costs.get(d, 0) for d in pdata['dates_ytd']},
+                        'total': sum(costs.values())
+                    }
+                    for service, costs in pdata['sorted_services_ytd']
+                ])},
+                dailyTotals: {json.dumps(pdata['daily_totals_ytd'])},
+                stats: {{
+                    totalCost: {sum(sum(costs.values()) for _, costs in pdata['sorted_services_ytd']) if pdata['sorted_services_ytd'] else 0:.2f},
+                    topServiceCost: {sum(pdata['sorted_services_ytd'][0][1].values()) if pdata['sorted_services_ytd'] else 0:.2f},
+                    avgDailyCost: {sum(pdata['daily_totals_ytd'].values()) / len(pdata['dates_ytd']) if pdata['dates_ytd'] else 0:.2f},
+                    servicesCount: {len(pdata['sorted_services_ytd'])}
+                }}
+            }}
+        }};
+'''
+
+html_content += '''
+        // Current state
+        let currentProfile = ''' + json.dumps('combined' if len(profiles) > 1 else profiles[0]) + ''';
+        let currentView = 'mtd';
+
         // Date ranges
         const dateRangeMTD = '$START_DATE_MTD to $END_DATE_MTD';
         const dateRangeYTD = '$START_DATE_YTD to $END_DATE_YTD';
-        
-        // Current view
-        let currentView = 'mtd';
-        
-        // Color palette
+
+        // AWS Color palette
         const colors = [
-            'rgba(255, 99, 132, 0.8)',
-            'rgba(54, 162, 235, 0.8)',
-            'rgba(255, 206, 86, 0.8)',
-            'rgba(75, 192, 192, 0.8)',
-            'rgba(153, 102, 255, 0.8)',
-            'rgba(255, 159, 64, 0.8)',
-            'rgba(199, 199, 199, 0.8)',
-            'rgba(83, 102, 255, 0.8)',
-            'rgba(255, 99, 255, 0.8)',
-            'rgba(50, 205, 50, 0.8)'
+            'rgba(255, 153, 0, 0.85)',     // AWS Orange
+            'rgba(35, 47, 62, 0.85)',      // AWS Squid Ink
+            'rgba(9, 114, 211, 0.85)',     // AWS Blue
+            'rgba(3, 127, 12, 0.85)',      // AWS Green
+            'rgba(209, 50, 18, 0.85)',     // AWS Red
+            'rgba(136, 18, 128, 0.85)',    // AWS Purple
+            'rgba(236, 114, 17, 0.85)',    // AWS Dark Orange
+            'rgba(0, 125, 188, 0.85)',     // AWS Teal
+            'rgba(96, 108, 118, 0.85)',    // AWS Gray
+            'rgba(22, 25, 31, 0.85)'       // AWS Navy
         ];
         
-        // Initialize chart
+        // Initialize chart with current profile data
         const ctx = document.getElementById('dailyCostChart');
+        const initialData = allProfilesData[currentProfile]['mtd'];
         let chart = new Chart(ctx, {
             type: 'bar',
             data: {
-                labels: datesMTD,
-                datasets: topServicesMTD.map((service, idx) => ({
+                labels: initialData.dates.map(d => d.substring(5)),
+                datasets: initialData.topServices.map((service, idx) => ({
                     ...service,
                     backgroundColor: colors[idx],
-                    borderColor: colors[idx].replace('0.8', '1'),
+                    borderColor: colors[idx].replace('0.85', '1'),
                     borderWidth: 1
                 }))
             },
@@ -687,13 +1012,27 @@ html_content += '''                </tbody>
                         position: 'top',
                         labels: {
                             boxWidth: 12,
-                            padding: 10
+                            padding: 15,
+                            font: {
+                                family: "'Amazon Ember', 'Open Sans', Arial, sans-serif",
+                                size: 13,
+                                weight: 600
+                            },
+                            color: '#232F3E'
                         }
                     },
                     title: {
                         display: true,
                         text: 'Daily Cost Breakdown - Top 10 Services (Stacked)',
-                        font: { size: 16 }
+                        font: {
+                            size: 18,
+                            weight: 700,
+                            family: "'Amazon Ember', 'Open Sans', Arial, sans-serif"
+                        },
+                        color: '#232F3E',
+                        padding: {
+                            bottom: 20
+                        }
                     },
                     tooltip: {
                         callbacks: {
@@ -713,110 +1052,254 @@ html_content += '''                </tbody>
                 scales: {
                     x: {
                         stacked: true,
+                        grid: {
+                            display: false
+                        },
+                        ticks: {
+                            font: {
+                                family: "'Amazon Ember', 'Open Sans', Arial, sans-serif",
+                                size: 12
+                            },
+                            color: '#545b64'
+                        }
                     },
                     y: {
                         stacked: true,
                         beginAtZero: true,
+                        grid: {
+                            color: '#e5e8eb'
+                        },
                         ticks: {
                             callback: function(value) {
                                 return '\$' + value.toFixed(0);
-                            }
+                            },
+                            font: {
+                                family: "'Amazon Ember', 'Open Sans', Arial, sans-serif",
+                                size: 12
+                            },
+                            color: '#545b64'
                         }
                     }
                 }
             }
         });
         
+        // Update AWS Info section
+        function updateAwsInfo() {
+            const infoContent = document.getElementById('awsInfoContent');
+
+            if (currentProfile === 'combined') {
+                // Show all profiles info
+                let html = '';
+                profiles.forEach(profile => {
+                    const metadata = profileMetadata[profile];
+                    html += '<div style="margin-bottom: 15px; padding-bottom: 15px; border-bottom: 1px solid #d5dbdb;">';
+                    html += '<div class="info-row"><div class="info-label">Profile:</div><div class="info-value">' + profile + '</div></div>';
+                    html += '<div class="info-row"><div class="info-label">Account ID:</div><div class="info-value">' + metadata.account_id + '</div></div>';
+                    html += '<div class="info-row"><div class="info-label">Identity (ARN):</div><div class="info-value">' + metadata.identity + '</div></div>';
+                    html += '</div>';
+                });
+                infoContent.innerHTML = html;
+            } else {
+                // Show single profile info
+                const metadata = profileMetadata[currentProfile];
+                let html = '';
+                html += '<div class="info-row"><div class="info-label">Profile:</div><div class="info-value">' + currentProfile + '</div></div>';
+                html += '<div class="info-row"><div class="info-label">Account ID:</div><div class="info-value">' + metadata.account_id + '</div></div>';
+                html += '<div class="info-row"><div class="info-label">Identity (ARN):</div><div class="info-value">' + metadata.identity + '</div></div>';
+                infoContent.innerHTML = html;
+            }
+        }
+
+        // Switch profile function
+        function switchProfile(profile) {
+            currentProfile = profile;
+
+            // Update profile tab buttons
+            if (profiles.length > 1) {
+                document.querySelectorAll('.profile-tab').forEach(btn => {
+                    btn.classList.remove('active');
+                });
+                document.getElementById('profileBtn_' + profile).classList.add('active');
+            }
+
+            // Update AWS info
+            updateAwsInfo();
+
+            // Refresh view with new profile data
+            toggleView(currentView);
+        }
+
         // Generate table HTML
         function generateTable(view) {
-            const dates = view === 'mtd' ? datesMTD : datesYTD;
-            const allServices = view === 'mtd' ? allServicesMTD : allServicesYTD;
-            const dailyTotals = view === 'mtd' ? dailyTotalsMTD : dailyTotalsYTD;
-            
-            let tableHTML = '<table><thead><tr><th>Service</th>';
-            
-            // Add date headers
-            dates.forEach(date => {
-                const dateLabel = date.substring(5); // Get MM-DD part
-                const weekendClass = isWeekend(date) ? ' class="weekend"' : '';
-                tableHTML += '<th' + weekendClass + '>' + dateLabel + '</th>';
+            const profileData = allProfilesData[currentProfile];
+            const viewData = profileData[view];
+            const dates = viewData.dates;
+            const allServices = viewData.allServices;
+            const dailyTotals = viewData.dailyTotals;
+
+            let tableHTML = '<table><thead>';
+
+            // Group dates by month with month totals
+            const monthsData = [];
+            let currentMonth = null;
+            dates.forEach(dateStr => {
+                const date = new Date(dateStr);
+                const monthKey = dateStr.substring(0, 7); // YYYY-MM
+                const monthName = date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' }); // "Jan 2026"
+
+                if (!currentMonth || currentMonth.key !== monthKey) {
+                    currentMonth = {
+                        key: monthKey,
+                        name: monthName,
+                        dates: [],
+                        serviceTotals: {},
+                        dailyTotalsSum: 0
+                    };
+                    monthsData.push(currentMonth);
+                }
+                currentMonth.dates.push(dateStr);
             });
-            tableHTML += '<th style="background: #e3e3e5;">Total</th></tr></thead><tbody>';
-            
-            // Add service rows
+
+            // Calculate monthly totals for each service and overall
+            allServices.forEach(service => {
+                monthsData.forEach(monthInfo => {
+                    const monthTotal = monthInfo.dates.reduce((sum, d) => sum + (service.costs[d] || 0), 0);
+                    monthInfo.serviceTotals[service.name] = monthTotal;
+                });
+            });
+
+            monthsData.forEach(monthInfo => {
+                monthInfo.dailyTotalsSum = monthInfo.dates.reduce((sum, d) => sum + (dailyTotals[d] || 0), 0);
+            });
+
+            // First header row: Month names (every 7 days) and month total columns
+            tableHTML += '<tr><th rowspan="2" style="background: #fafafa; vertical-align: middle;">Service</th>';
+            monthsData.forEach(monthInfo => {
+                const monthDates = monthInfo.dates;
+                // Show month name every 7 days
+                for (let i = 0; i < monthDates.length; i += 7) {
+                    const remainingDays = Math.min(7, monthDates.length - i);
+                    tableHTML += '<th colspan="' + remainingDays + '" style="background: #232F3E; color: #FF9900; border-bottom: 1px solid #FF9900; font-size: 11px;">' + monthInfo.name + '</th>';
+                }
+                // Month total column
+                tableHTML += '<th rowspan="2" style="background: #FF9900; color: white; vertical-align: middle; font-size: 11px;">' + monthInfo.name.split(' ')[0] + '<br/>Total</th>';
+            });
+            // Grand total column
+            tableHTML += '<th rowspan="2" style="background: #232F3E; color: white; vertical-align: middle;">Grand<br/>Total</th>';
+            tableHTML += '</tr>';
+
+            // Second header row: Day numbers
+            tableHTML += '<tr>';
+            monthsData.forEach(monthInfo => {
+                monthInfo.dates.forEach(dateStr => {
+                    const day = dateStr.substring(8); // Get DD part
+                    const weekendClass = isWeekend(dateStr) ? ' class="weekend"' : '';
+                    tableHTML += '<th' + weekendClass + ' style="font-size: 11px;">' + day + '</th>';
+                });
+            });
+            tableHTML += '</tr></thead><tbody>';
+
+            // Add service rows with month totals
             allServices.forEach(service => {
                 tableHTML += '<tr>';
                 const serviceName = service.name.length > 70 ? service.name.substring(0, 70) : service.name;
                 tableHTML += '<td title="' + service.name + '">' + serviceName + '</td>';
-                
-                dates.forEach(date => {
-                    const cost = service.costs[date] || 0;
-                    const costClass = cost > 50 ? 'cost-high' : (cost > 10 ? 'cost-medium' : 'cost-low');
-                    const costStr = cost > 0 ? cost.toFixed(2) : '-';
-                    const weekendClass = isWeekend(date) ? ' weekend' : '';
-                    tableHTML += '<td class="' + costClass + weekendClass + '">' + costStr + '</td>';
+
+                // Add daily costs grouped by month with month totals
+                monthsData.forEach(monthInfo => {
+                    monthInfo.dates.forEach(date => {
+                        const cost = service.costs[date] || 0;
+                        const costClass = cost > 50 ? 'cost-high' : (cost > 10 ? 'cost-medium' : 'cost-low');
+                        const costStr = cost > 0 ? cost.toFixed(2) : '-';
+                        const weekendClass = isWeekend(date) ? ' weekend' : '';
+                        tableHTML += '<td class="' + costClass + weekendClass + '">' + costStr + '</td>';
+                    });
+
+                    // Month total cell
+                    const monthTotal = monthInfo.serviceTotals[service.name] || 0;
+                    tableHTML += '<td style="font-weight: bold; background: #fff8e6; color: #232F3E; border-left: 2px solid #FF9900;">\$' + monthTotal.toFixed(2) + '</td>';
                 });
-                
-                tableHTML += '<td style="font-weight: bold; background: #f5f5f7;">\$' + service.total.toFixed(2) + '</td>';
+
+                // Grand total cell
+                tableHTML += '<td style="font-weight: bold; background: #fafafa; color: #232F3E; border-left: 2px solid #232F3E;">\$' + service.total.toFixed(2) + '</td>';
                 tableHTML += '</tr>';
             });
-            
-            // Add total row
+
+            // Add total row with month totals
             tableHTML += '<tr class="total-row"><td>TOTAL</td>';
+
             let grandTotal = 0;
-            dates.forEach(date => {
-                const total = dailyTotals[date] || 0;
-                grandTotal += total;
-                const weekendClass = isWeekend(date) ? ' weekend' : '';
-                tableHTML += '<td class="' + weekendClass + '">\$' + total.toFixed(2) + '</td>';
+            monthsData.forEach(monthInfo => {
+                // Daily totals for this month
+                monthInfo.dates.forEach(date => {
+                    const total = dailyTotals[date] || 0;
+                    grandTotal += total;
+                    const weekendClass = isWeekend(date) ? ' weekend' : '';
+                    tableHTML += '<td class="' + weekendClass + '">\$' + total.toFixed(2) + '</td>';
+                });
+
+                // Month total cell
+                tableHTML += '<td style="background: #FF9900; color: white; font-weight: 700; border-left: 2px solid white;">\$' + monthInfo.dailyTotalsSum.toFixed(2) + '</td>';
             });
-            tableHTML += '<td style="background: #e3e3e5;">\$' + grandTotal.toFixed(2) + '</td>';
+
+            // Grand total cell
+            tableHTML += '<td style="background: #232F3E; color: white; font-weight: 700; border-left: 2px solid white;">\$' + grandTotal.toFixed(2) + '</td>';
             tableHTML += '</tr></tbody></table>';
-            
+
             return tableHTML;
         }
-        
+
         // Toggle function
         function toggleView(view) {
             currentView = view;
-            
+
+            // Get profile data
+            const profileData = allProfilesData[currentProfile];
+            const viewData = profileData[view];
+
             // Update button states
             document.getElementById('mtdBtn').classList.toggle('active', view === 'mtd');
             document.getElementById('ytdBtn').classList.toggle('active', view === 'ytd');
-            
+
             // Update subtitle
             const subtitle = view === 'mtd' ? '$MONTH_NAME • Month-to-Date Analysis' : '$MONTH_NAME • Year-to-Date Analysis';
             document.getElementById('subtitle').textContent = subtitle;
-            
+
             // Update date range
             const dateRange = view === 'mtd' ? dateRangeMTD : dateRangeYTD;
             document.getElementById('dateRange').textContent = dateRange;
-            
+
             // Update stats
-            const stats = view === 'mtd' ? statsMTD : statsYTD;
+            const stats = viewData.stats;
             const summaryCards = document.querySelectorAll('.summary-card p');
             summaryCards[0].textContent = '\$' + stats.totalCost.toFixed(2);
             summaryCards[1].textContent = '\$' + stats.topServiceCost.toFixed(2);
             summaryCards[2].textContent = '\$' + stats.avgDailyCost.toFixed(2);
             summaryCards[3].textContent = stats.servicesCount;
-            
+
             // Update chart
-            const dates = view === 'mtd' ? datesMTD : datesYTD;
-            const topServices = view === 'mtd' ? topServicesMTD : topServicesYTD;
-            
+            const dates = viewData.dates;
+            const topServices = viewData.topServices;
+
             chart.data.labels = dates.map(d => d.substring(5));
             chart.data.datasets = topServices.map((service, idx) => ({
                 ...service,
                 backgroundColor: colors[idx],
-                borderColor: colors[idx].replace('0.8', '1'),
+                borderColor: colors[idx].replace('0.85', '1'),
                 borderWidth: 1
             }));
             chart.update();
-            
+
             // Update table
             const tableWrapper = document.querySelector('.table-wrapper');
             tableWrapper.innerHTML = generateTable(view);
         }
+
+        // Initialize on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            updateAwsInfo();
+        });
     </script>
 </body>
 </html>
@@ -844,4 +1327,6 @@ else
 fi
 
 # Cleanup
-rm -f "$TEMP_FILE_MTD" "$TEMP_FILE_YTD"
+for temp_file in "${TEMP_FILES_MTD[@]}" "${TEMP_FILES_YTD[@]}"; do
+    rm -f "$temp_file"
+done
