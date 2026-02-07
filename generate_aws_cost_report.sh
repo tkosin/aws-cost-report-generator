@@ -301,8 +301,8 @@ profile_identities = {}
 profile_account_ids = {}
 
 for profile in profiles:
-    # Replace hyphens and dots with underscores to match env var names
-    safe_profile = profile.replace('-', '__').replace('.', '__')
+    # Replace hyphens and dots with single underscores to match env var names (same as bash sed)
+    safe_profile = profile.replace('-', '_').replace('.', '_')
     profile_identities[profile] = os.environ.get(f'PROFILE_IDENTITY_{safe_profile}', '')
     profile_account_ids[profile] = os.environ.get(f'PROFILE_ACCOUNT_ID_{safe_profile}', '')
 
@@ -526,6 +526,16 @@ html_content = '''<!DOCTYPE html>
             font-weight: 700;
             color: #FF9900;
         }
+        .summary-card .forecast {
+            font-size: 14px;
+            color: #545b64;
+            margin-top: 8px;
+            font-weight: 400;
+        }
+        .summary-card .forecast.warning {
+            color: #d13212;
+            font-weight: 600;
+        }
         .chart-container {
             margin: 40px 0;
             height: 500px;
@@ -711,6 +721,38 @@ html_content = '''<!DOCTYPE html>
             font-weight: 700;
             margin-top: 50px;
         }
+        .export-btn {
+            background: #0972d3;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            border-radius: 2px;
+            transition: background 0.15s ease;
+            margin-left: 12px;
+        }
+        .export-btn:hover {
+            background: #0860b0;
+        }
+        .anomaly {
+            background: #fdf2f2 !important;
+            border: 2px solid #d13212 !important;
+            font-weight: 700 !important;
+        }
+        .anomaly-indicator {
+            color: #d13212;
+            font-size: 10px;
+            vertical-align: super;
+        }
+        .percentage {
+            font-size: 11px;
+            color: #687078;
+            font-weight: 400;
+            display: block;
+            margin-top: 2px;
+        }
     </style>
 </head>
 <body>
@@ -739,6 +781,7 @@ html_content += '''
                     <button class="toggle-option active" id="mtdBtn" onclick="toggleView('mtd')">MTD</button>
                     <button class="toggle-option" id="ytdBtn" onclick="toggleView('ytd')">YTD</button>
                 </div>
+                <button class="export-btn" onclick="exportToCSV()">📥 Export CSV</button>
             </div>
         </div>
 
@@ -752,19 +795,21 @@ html_content += '''
         <div class="summary" id="summary">
             <div class="summary-card">
                 <h3>Total Cost</h3>
-                <p>\$''' + f"{sum(sum(costs.values()) for _, costs in sorted_services):.2f}" + '''</p>
+                <p id="totalCost">\$''' + f"{sum(sum(costs.values()) for _, costs in sorted_services):.2f}" + '''</p>
+                <div class="forecast" id="forecastText"></div>
             </div>
             <div class="summary-card" style="border-color: #0972d3;">
                 <h3>Top Service</h3>
-                <p style="color: #0972d3;">\$''' + f"{sum(sorted_services[0][1].values()):.2f}" + '''</p>
+                <p style="color: #0972d3;" id="topService">\$''' + f"{sum(sorted_services[0][1].values()):.2f}" + '''</p>
+                <div class="percentage" id="topServicePct">''' + f"{sum(sorted_services[0][1].values()) / sum(sum(costs.values()) for _, costs in sorted_services) * 100:.1f}% of total" + '''</div>
             </div>
             <div class="summary-card" style="border-color: #037f0c;">
                 <h3>Avg Daily Cost</h3>
-                <p style="color: #037f0c;">\$''' + f"{sum(daily_totals.values()) / len(dates):.2f}" + '''</p>
+                <p style="color: #037f0c;" id="avgDaily">\$''' + f"{sum(daily_totals.values()) / len(dates):.2f}" + '''</p>
             </div>
             <div class="summary-card" style="border-color: #232F3E;">
                 <h3>Services</h3>
-                <p style="color: #232F3E;">''' + str(len(sorted_services)) + '''</p>
+                <p style="color: #232F3E;" id="servicesCount">''' + str(len(sorted_services)) + '''</p>
             </div>
         </div>
 
@@ -889,15 +934,118 @@ html_content += '''                </tbody>
             return day === 0 || day === 6; // Sunday = 0, Saturday = 6
         }
 
+        // Calculate forecast for end of month (linear regression)
+        function calculateForecast(dates, dailyTotals) {
+            if (!dates || dates.length < 2) return null;
+
+            // Get current month's last day
+            const firstDate = new Date(dates[0]);
+            const year = firstDate.getFullYear();
+            const month = firstDate.getMonth();
+            const lastDayOfMonth = new Date(year, month + 1, 0).getDate();
+            const currentDay = dates.length;
+
+            // Calculate average daily cost
+            const totalCost = Object.values(dailyTotals).reduce((sum, cost) => sum + cost, 0);
+            const avgDaily = totalCost / dates.length;
+
+            // Simple linear projection
+            const forecastTotal = avgDaily * lastDayOfMonth;
+            const remainingDays = lastDayOfMonth - currentDay;
+            const remainingCost = avgDaily * remainingDays;
+
+            return {
+                forecastTotal: forecastTotal,
+                remainingCost: remainingCost,
+                currentDay: currentDay,
+                lastDay: lastDayOfMonth,
+                avgDaily: avgDaily
+            };
+        }
+
+        // Detect cost anomalies (days with unusual costs)
+        function detectAnomalies(dailyTotals, threshold = 2.0) {
+            const costs = Object.values(dailyTotals);
+            if (costs.length < 3) return new Set();
+
+            // Calculate mean and standard deviation
+            const mean = costs.reduce((sum, cost) => sum + cost, 0) / costs.length;
+            const variance = costs.reduce((sum, cost) => sum + Math.pow(cost - mean, 2), 0) / costs.length;
+            const stdDev = Math.sqrt(variance);
+
+            // Find anomalies (values beyond threshold standard deviations)
+            const anomalies = new Set();
+            Object.entries(dailyTotals).forEach(([date, cost]) => {
+                if (Math.abs(cost - mean) > threshold * stdDev && cost > mean) {
+                    anomalies.add(date);
+                }
+            });
+
+            return anomalies;
+        }
+
+        // Export data to CSV
+        function exportToCSV() {
+            const profileData = allProfilesData[currentProfile];
+            const viewData = profileData[currentView];
+            const dates = viewData.dates;
+            const allServices = viewData.allServices;
+            const dailyTotals = viewData.dailyTotals;
+
+            // Create CSV header
+            let csv = 'Service,' + dates.join(',') + ',Total' + String.fromCharCode(10);
+
+            // Add service rows
+            allServices.forEach(service => {
+                const row = [service.name];
+                dates.forEach(date => {
+                    row.push((service.costs[date] || 0).toFixed(2));
+                });
+                row.push(service.total.toFixed(2));
+                csv += row.join(',') + String.fromCharCode(10);
+            });
+
+            // Add total row
+            const totalRow = ['TOTAL'];
+            dates.forEach(date => {
+                totalRow.push((dailyTotals[date] || 0).toFixed(2));
+            });
+            const grandTotal = Object.values(dailyTotals).reduce((sum, cost) => sum + cost, 0);
+            totalRow.push(grandTotal.toFixed(2));
+            csv += totalRow.join(',') + String.fromCharCode(10);
+
+            // Download CSV
+            const blob = new Blob([csv], { type: 'text/csv' });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'aws_cost_report_' + currentProfile + '_' + currentView + '_' + dates[0].substring(0, 7) + '.csv';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            window.URL.revokeObjectURL(url);
+        }
+
         // Profiles configuration
         const profiles = ''' + json.dumps(profiles) + ''';
-        const profileMetadata = ''' + json.dumps({
-            profile: {
-                'identity': profile_identities[profile],
-                'account_id': profile_account_ids[profile]
-            } for profile in profiles
-        }) + ''';
 
+        // Profile metadata
+        const profileMetadata = {};
+'''
+
+# Add profile metadata for each profile
+for profile in profiles:
+    safe_profile = profile.replace('-', '_').replace('.', '_')
+    identity = profile_identities.get(profile, '')
+    account_id = profile_account_ids.get(profile, '')
+    html_content += f'''
+        profileMetadata[{json.dumps(profile)}] = {{
+            identity: {json.dumps(identity)},
+            account_id: {json.dumps(account_id)}
+        }};
+'''
+
+html_content += '''
         // Profile data - prepare JavaScript data structure
         const allProfilesData = {};
 '''
@@ -907,61 +1055,98 @@ for profile_key in ['combined'] + profiles:
     if profile_key in profile_data_output:
         pdata = profile_data_output[profile_key]
 
-        # Prepare MTD data
-        html_content += f'''
-        allProfilesData['{profile_key}'] = {{
+        # Prepare data for JSON serialization
+        mtd_top_services = [
+            {
+                'label': service[:40],
+                'data': [costs.get(d, 0) for d in pdata['dates_mtd']],
+            }
+            for service, costs in pdata['sorted_services_mtd'][:10]
+        ]
+
+        mtd_all_services = [
+            {
+                'name': service,
+                'costs': {d: costs.get(d, 0) for d in pdata['dates_mtd']},
+                'total': sum(costs.values())
+            }
+            for service, costs in pdata['sorted_services_mtd']
+        ]
+
+        ytd_top_services = [
+            {
+                'label': service[:40],
+                'data': [costs.get(d, 0) for d in pdata['dates_ytd']],
+            }
+            for service, costs in pdata['sorted_services_ytd'][:10]
+        ]
+
+        ytd_all_services = [
+            {
+                'name': service,
+                'costs': {d: costs.get(d, 0) for d in pdata['dates_ytd']},
+                'total': sum(costs.values())
+            }
+            for service, costs in pdata['sorted_services_ytd']
+        ]
+
+        mtd_total_cost = sum(sum(costs.values()) for _, costs in pdata['sorted_services_mtd']) if pdata['sorted_services_mtd'] else 0
+        mtd_top_service_cost = sum(pdata['sorted_services_mtd'][0][1].values()) if pdata['sorted_services_mtd'] else 0
+        mtd_avg_daily = sum(pdata['daily_totals_mtd'].values()) / len(pdata['dates_mtd']) if pdata['dates_mtd'] else 0
+        mtd_services_count = len(pdata['sorted_services_mtd'])
+
+        ytd_total_cost = sum(sum(costs.values()) for _, costs in pdata['sorted_services_ytd']) if pdata['sorted_services_ytd'] else 0
+        ytd_top_service_cost = sum(pdata['sorted_services_ytd'][0][1].values()) if pdata['sorted_services_ytd'] else 0
+        ytd_avg_daily = sum(pdata['daily_totals_ytd'].values()) / len(pdata['dates_ytd']) if pdata['dates_ytd'] else 0
+        ytd_services_count = len(pdata['sorted_services_ytd'])
+
+        # Generate JavaScript code with proper escaping
+        html_content += '''
+        allProfilesData['{}'] = {{
             mtd: {{
-                dates: {json.dumps(pdata['dates_mtd'])},
-                topServices: {json.dumps([
-                    {
-                        'label': service[:40],
-                        'data': [costs.get(d, 0) for d in pdata['dates_mtd']],
-                    }
-                    for service, costs in pdata['sorted_services_mtd'][:10]
-                ])},
-                allServices: {json.dumps([
-                    {
-                        'name': service,
-                        'costs': {d: costs.get(d, 0) for d in pdata['dates_mtd']},
-                        'total': sum(costs.values())
-                    }
-                    for service, costs in pdata['sorted_services_mtd']
-                ])},
-                dailyTotals: {json.dumps(pdata['daily_totals_mtd'])},
+                dates: {},
+                topServices: {},
+                allServices: {},
+                dailyTotals: {},
                 stats: {{
-                    totalCost: {sum(sum(costs.values()) for _, costs in pdata['sorted_services_mtd']) if pdata['sorted_services_mtd'] else 0:.2f},
-                    topServiceCost: {sum(pdata['sorted_services_mtd'][0][1].values()) if pdata['sorted_services_mtd'] else 0:.2f},
-                    avgDailyCost: {sum(pdata['daily_totals_mtd'].values()) / len(pdata['dates_mtd']) if pdata['dates_mtd'] else 0:.2f},
-                    servicesCount: {len(pdata['sorted_services_mtd'])}
+                    totalCost: {:.2f},
+                    topServiceCost: {:.2f},
+                    avgDailyCost: {:.2f},
+                    servicesCount: {}
                 }}
             }},
             ytd: {{
-                dates: {json.dumps(pdata['dates_ytd'])},
-                topServices: {json.dumps([
-                    {
-                        'label': service[:40],
-                        'data': [costs.get(d, 0) for d in pdata['dates_ytd']],
-                    }
-                    for service, costs in pdata['sorted_services_ytd'][:10]
-                ])},
-                allServices: {json.dumps([
-                    {
-                        'name': service,
-                        'costs': {d: costs.get(d, 0) for d in pdata['dates_ytd']},
-                        'total': sum(costs.values())
-                    }
-                    for service, costs in pdata['sorted_services_ytd']
-                ])},
-                dailyTotals: {json.dumps(pdata['daily_totals_ytd'])},
+                dates: {},
+                topServices: {},
+                allServices: {},
+                dailyTotals: {},
                 stats: {{
-                    totalCost: {sum(sum(costs.values()) for _, costs in pdata['sorted_services_ytd']) if pdata['sorted_services_ytd'] else 0:.2f},
-                    topServiceCost: {sum(pdata['sorted_services_ytd'][0][1].values()) if pdata['sorted_services_ytd'] else 0:.2f},
-                    avgDailyCost: {sum(pdata['daily_totals_ytd'].values()) / len(pdata['dates_ytd']) if pdata['dates_ytd'] else 0:.2f},
-                    servicesCount: {len(pdata['sorted_services_ytd'])}
+                    totalCost: {:.2f},
+                    topServiceCost: {:.2f},
+                    avgDailyCost: {:.2f},
+                    servicesCount: {}
                 }}
             }}
         }};
-'''
+'''.format(
+            profile_key,
+            json.dumps(pdata['dates_mtd']),
+            json.dumps(mtd_top_services),
+            json.dumps(mtd_all_services),
+            json.dumps(pdata['daily_totals_mtd']),
+            mtd_total_cost,
+            mtd_top_service_cost,
+            mtd_avg_daily,
+            mtd_services_count,
+            json.dumps(pdata['dates_ytd']),
+            json.dumps(ytd_top_services),
+            json.dumps(ytd_all_services),
+            json.dumps(pdata['daily_totals_ytd']),
+            ytd_total_cost,
+            ytd_top_service_cost,
+            ytd_avg_daily,
+            ytd_services_count
+        )
 
 html_content += '''
         // Current state
@@ -985,105 +1170,115 @@ html_content += '''
             'rgba(96, 108, 118, 0.85)',    // AWS Gray
             'rgba(22, 25, 31, 0.85)'       // AWS Navy
         ];
-        
+
+        // Chart variable (will be initialized after DOM loads)
+        let chart = null;
+
         // Initialize chart with current profile data
-        const ctx = document.getElementById('dailyCostChart');
-        const initialData = allProfilesData[currentProfile]['mtd'];
-        let chart = new Chart(ctx, {
-            type: 'bar',
-            data: {
-                labels: initialData.dates.map(d => d.substring(5)),
-                datasets: initialData.topServices.map((service, idx) => ({
-                    ...service,
-                    backgroundColor: colors[idx],
-                    borderColor: colors[idx].replace('0.85', '1'),
-                    borderWidth: 1
-                }))
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                interaction: {
-                    mode: 'index',
-                    intersect: false
+        function initializeChart() {
+            const ctx = document.getElementById('dailyCostChart');
+            if (!ctx) {
+                console.error('Chart canvas not found');
+                return;
+            }
+
+            const initialData = allProfilesData[currentProfile]['mtd'];
+            chart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: initialData.dates.map(d => d.substring(5)),
+                    datasets: initialData.topServices.map((service, idx) => ({
+                        ...service,
+                        backgroundColor: colors[idx],
+                        borderColor: colors[idx].replace('0.85', '1'),
+                        borderWidth: 1
+                    }))
                 },
-                plugins: {
-                    legend: {
-                        position: 'top',
-                        labels: {
-                            boxWidth: 12,
-                            padding: 15,
-                            font: {
-                                family: "'Amazon Ember', 'Open Sans', Arial, sans-serif",
-                                size: 13,
-                                weight: 600
-                            },
-                            color: '#232F3E'
-                        }
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false
                     },
-                    title: {
-                        display: true,
-                        text: 'Daily Cost Breakdown - Top 10 Services (Stacked)',
-                        font: {
-                            size: 18,
-                            weight: 700,
-                            family: "'Amazon Ember', 'Open Sans', Arial, sans-serif"
+                    plugins: {
+                        legend: {
+                            position: 'top',
+                            labels: {
+                                boxWidth: 12,
+                                padding: 15,
+                                font: {
+                                    family: "'Amazon Ember', 'Open Sans', Arial, sans-serif",
+                                    size: 13,
+                                    weight: 600
+                                },
+                                color: '#232F3E'
+                            }
                         },
-                        color: '#232F3E',
-                        padding: {
-                            bottom: 20
+                        title: {
+                            display: true,
+                            text: 'Daily Cost Breakdown - Top 10 Services (Stacked)',
+                            font: {
+                                size: 18,
+                                weight: 700,
+                                family: "'Amazon Ember', 'Open Sans', Arial, sans-serif"
+                            },
+                            color: '#232F3E',
+                            padding: {
+                                bottom: 20
+                            }
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    return context.dataset.label + ': \$' + context.parsed.y.toFixed(2);
+                                },
+                                footer: function(tooltipItems) {
+                                    let total = 0;
+                                    tooltipItems.forEach(function(tooltipItem) {
+                                        total += tooltipItem.parsed.y;
+                                    });
+                                    return 'Total: \$' + total.toFixed(2);
+                                }
+                            }
                         }
                     },
-                    tooltip: {
-                        callbacks: {
-                            label: function(context) {
-                                return context.dataset.label + ': \$' + context.parsed.y.toFixed(2);
+                    scales: {
+                        x: {
+                            stacked: true,
+                            grid: {
+                                display: false
                             },
-                            footer: function(tooltipItems) {
-                                let total = 0;
-                                tooltipItems.forEach(function(tooltipItem) {
-                                    total += tooltipItem.parsed.y;
-                                });
-                                return 'Total: \$' + total.toFixed(2);
+                            ticks: {
+                                font: {
+                                    family: "'Amazon Ember', 'Open Sans', Arial, sans-serif",
+                                    size: 12
+                                },
+                                color: '#545b64'
+                            }
+                        },
+                        y: {
+                            stacked: true,
+                            beginAtZero: true,
+                            grid: {
+                                color: '#e5e8eb'
+                            },
+                            ticks: {
+                                callback: function(value) {
+                                    return '\$' + value.toFixed(0);
+                                },
+                                font: {
+                                    family: "'Amazon Ember', 'Open Sans', Arial, sans-serif",
+                                    size: 12
+                                },
+                                color: '#545b64'
                             }
                         }
                     }
-                },
-                scales: {
-                    x: {
-                        stacked: true,
-                        grid: {
-                            display: false
-                        },
-                        ticks: {
-                            font: {
-                                family: "'Amazon Ember', 'Open Sans', Arial, sans-serif",
-                                size: 12
-                            },
-                            color: '#545b64'
-                        }
-                    },
-                    y: {
-                        stacked: true,
-                        beginAtZero: true,
-                        grid: {
-                            color: '#e5e8eb'
-                        },
-                        ticks: {
-                            callback: function(value) {
-                                return '\$' + value.toFixed(0);
-                            },
-                            font: {
-                                family: "'Amazon Ember', 'Open Sans', Arial, sans-serif",
-                                size: 12
-                            },
-                            color: '#545b64'
-                        }
-                    }
                 }
-            }
-        });
-        
+            });
+        }
+
         // Update AWS Info section
         function updateAwsInfo() {
             const infoContent = document.getElementById('awsInfoContent');
@@ -1113,30 +1308,50 @@ html_content += '''
 
         // Switch profile function
         function switchProfile(profile) {
-            currentProfile = profile;
+            try {
+                currentProfile = profile;
 
-            // Update profile tab buttons
-            if (profiles.length > 1) {
-                document.querySelectorAll('.profile-tab').forEach(btn => {
-                    btn.classList.remove('active');
-                });
-                document.getElementById('profileBtn_' + profile).classList.add('active');
+                // Update profile tab buttons
+                if (profiles.length > 1) {
+                    document.querySelectorAll('.profile-tab').forEach(btn => {
+                        btn.classList.remove('active');
+                    });
+                    const profileBtn = document.getElementById('profileBtn_' + profile);
+                    if (profileBtn) {
+                        profileBtn.classList.add('active');
+                    }
+                }
+
+                // Update AWS info
+                updateAwsInfo();
+
+                // Refresh view with new profile data
+                toggleView(currentView);
+            } catch (error) {
+                console.error('Error in switchProfile:', error);
             }
-
-            // Update AWS info
-            updateAwsInfo();
-
-            // Refresh view with new profile data
-            toggleView(currentView);
         }
 
         // Generate table HTML
         function generateTable(view) {
             const profileData = allProfilesData[currentProfile];
+            if (!profileData) {
+                console.error('Profile data not found in generateTable');
+                return '<p>Error: Profile data not found</p>';
+            }
+
             const viewData = profileData[view];
-            const dates = viewData.dates;
-            const allServices = viewData.allServices;
-            const dailyTotals = viewData.dailyTotals;
+            if (!viewData) {
+                console.error('View data not found in generateTable');
+                return '<p>Error: View data not found</p>';
+            }
+
+            const dates = viewData.dates || [];
+            const allServices = viewData.allServices || [];
+            const dailyTotals = viewData.dailyTotals || {};
+
+            // Detect anomalies
+            const anomalies = detectAnomalies(dailyTotals);
 
             let tableHTML = '<table><thead>';
 
@@ -1204,7 +1419,8 @@ html_content += '''
             allServices.forEach(service => {
                 tableHTML += '<tr>';
                 const serviceName = service.name.length > 70 ? service.name.substring(0, 70) : service.name;
-                tableHTML += '<td title="' + service.name + '">' + serviceName + '</td>';
+                const servicePct = ((service.total / Object.values(dailyTotals).reduce((sum, cost) => sum + cost, 0)) * 100).toFixed(1);
+                tableHTML += '<td title="' + service.name + '">' + serviceName + '<span class="percentage">' + servicePct + '%</span></td>';
 
                 // Add daily costs grouped by month with month totals
                 monthsData.forEach(monthInfo => {
@@ -1213,7 +1429,9 @@ html_content += '''
                         const costClass = cost > 50 ? 'cost-high' : (cost > 10 ? 'cost-medium' : 'cost-low');
                         const costStr = cost > 0 ? cost.toFixed(2) : '-';
                         const weekendClass = isWeekend(date) ? ' weekend' : '';
-                        tableHTML += '<td class="' + costClass + weekendClass + '">' + costStr + '</td>';
+                        const anomalyClass = anomalies.has(date) && cost > 10 ? ' anomaly' : '';
+                        const anomalyIndicator = anomalies.has(date) && cost > 10 ? '<span class="anomaly-indicator">⚠</span>' : '';
+                        tableHTML += '<td class="' + costClass + weekendClass + anomalyClass + '">' + costStr + anomalyIndicator + '</td>';
                     });
 
                     // Month total cell
@@ -1252,53 +1470,138 @@ html_content += '''
 
         // Toggle function
         function toggleView(view) {
-            currentView = view;
+            try {
+                currentView = view;
 
-            // Get profile data
-            const profileData = allProfilesData[currentProfile];
-            const viewData = profileData[view];
+                // Get profile data
+                const profileData = allProfilesData[currentProfile];
+                if (!profileData) {
+                    console.error('Profile data not found for:', currentProfile);
+                    return;
+                }
 
-            // Update button states
-            document.getElementById('mtdBtn').classList.toggle('active', view === 'mtd');
-            document.getElementById('ytdBtn').classList.toggle('active', view === 'ytd');
+                const viewData = profileData[view];
+                if (!viewData) {
+                    console.error('View data not found for:', view);
+                    return;
+                }
 
-            // Update subtitle
-            const subtitle = view === 'mtd' ? '$MONTH_NAME • Month-to-Date Analysis' : '$MONTH_NAME • Year-to-Date Analysis';
-            document.getElementById('subtitle').textContent = subtitle;
+                // Update button states
+                document.getElementById('mtdBtn').classList.toggle('active', view === 'mtd');
+                document.getElementById('ytdBtn').classList.toggle('active', view === 'ytd');
 
-            // Update date range
-            const dateRange = view === 'mtd' ? dateRangeMTD : dateRangeYTD;
-            document.getElementById('dateRange').textContent = dateRange;
+                // Update subtitle
+                const subtitle = view === 'mtd' ? '$MONTH_NAME • Month-to-Date Analysis' : '$MONTH_NAME • Year-to-Date Analysis';
+                document.getElementById('subtitle').textContent = subtitle;
 
-            // Update stats
-            const stats = viewData.stats;
-            const summaryCards = document.querySelectorAll('.summary-card p');
-            summaryCards[0].textContent = '\$' + stats.totalCost.toFixed(2);
-            summaryCards[1].textContent = '\$' + stats.topServiceCost.toFixed(2);
-            summaryCards[2].textContent = '\$' + stats.avgDailyCost.toFixed(2);
-            summaryCards[3].textContent = stats.servicesCount;
+                // Update date range
+                const dateRange = view === 'mtd' ? dateRangeMTD : dateRangeYTD;
+                document.getElementById('dateRange').textContent = dateRange;
 
-            // Update chart
-            const dates = viewData.dates;
-            const topServices = viewData.topServices;
+                // Update stats
+                const stats = viewData.stats;
+                document.getElementById('totalCost').textContent = '\$' + stats.totalCost.toFixed(2);
+                document.getElementById('topService').textContent = '\$' + stats.topServiceCost.toFixed(2);
+                document.getElementById('avgDaily').textContent = '\$' + stats.avgDailyCost.toFixed(2);
+                document.getElementById('servicesCount').textContent = stats.servicesCount;
 
-            chart.data.labels = dates.map(d => d.substring(5));
-            chart.data.datasets = topServices.map((service, idx) => ({
-                ...service,
-                backgroundColor: colors[idx],
-                borderColor: colors[idx].replace('0.85', '1'),
-                borderWidth: 1
-            }));
-            chart.update();
+                // Update percentage for top service
+                const topServicePct = ((stats.topServiceCost / stats.totalCost) * 100).toFixed(1);
+                document.getElementById('topServicePct').textContent = topServicePct + '% of total';
 
-            // Update table
-            const tableWrapper = document.querySelector('.table-wrapper');
-            tableWrapper.innerHTML = generateTable(view);
+                // Calculate and display forecast (only for MTD)
+                const forecastElement = document.getElementById('forecastText');
+                if (view === 'mtd' && viewData.dates && viewData.dates.length > 0) {
+                    const forecast = calculateForecast(viewData.dates, viewData.dailyTotals);
+                    if (forecast) {
+                        const isPartialMonth = forecast.currentDay < forecast.lastDay;
+                        if (isPartialMonth) {
+                            const increase = forecast.forecastTotal - stats.totalCost;
+                            const increasePercent = ((increase / stats.totalCost) * 100).toFixed(0);
+                            forecastElement.innerHTML = '📈 Forecast: <strong>\$' + forecast.forecastTotal.toFixed(2) + '</strong> by month end<br/><span style="font-size: 12px;">(+\$' + increase.toFixed(2) + ', +' + increasePercent + '% from current)</span>';
+                            forecastElement.className = 'forecast';
+                        } else {
+                            forecastElement.innerHTML = '✅ Month complete';
+                            forecastElement.className = 'forecast';
+                        }
+                    } else {
+                        forecastElement.innerHTML = '';
+                    }
+                } else {
+                    forecastElement.innerHTML = '';
+                }
+
+                // Update chart
+                if (chart) {
+                    const dates = viewData.dates;
+                    const topServices = viewData.topServices;
+
+                    chart.data.labels = dates.map(d => d.substring(5));
+                    chart.data.datasets = topServices.map((service, idx) => ({
+                        ...service,
+                        backgroundColor: colors[idx],
+                        borderColor: colors[idx].replace('0.85', '1'),
+                        borderWidth: 1
+                    }));
+                    chart.update();
+                }
+
+                // Update table
+                const tableWrapper = document.querySelector('.table-wrapper');
+                if (tableWrapper) {
+                    tableWrapper.innerHTML = generateTable(view);
+                }
+            } catch (error) {
+                console.error('Error in toggleView:', error);
+            }
         }
 
         // Initialize on page load
         document.addEventListener('DOMContentLoaded', function() {
+            console.log('Initializing page...');
+            console.log('Current profile:', currentProfile);
+            console.log('Current view:', currentView);
+
+            initializeChart();
             updateAwsInfo();
+
+            // Initialize forecast and other dynamic content
+            const profileData = allProfilesData[currentProfile];
+            const viewData = profileData[currentView];
+
+            console.log('View data:', viewData);
+            console.log('Dates count:', viewData.dates.length);
+
+            // Calculate forecast
+            if (currentView === 'mtd' && viewData.dates && viewData.dates.length > 0) {
+                const forecast = calculateForecast(viewData.dates, viewData.dailyTotals);
+                console.log('Forecast data:', forecast);
+
+                if (forecast) {
+                    const forecastElement = document.getElementById('forecastText');
+                    const isPartialMonth = forecast.currentDay < forecast.lastDay;
+
+                    console.log('Is partial month:', isPartialMonth);
+                    console.log('Current day:', forecast.currentDay);
+                    console.log('Last day:', forecast.lastDay);
+
+                    if (isPartialMonth) {
+                        const stats = viewData.stats;
+                        const increase = forecast.forecastTotal - stats.totalCost;
+                        const increasePercent = ((increase / stats.totalCost) * 100).toFixed(0);
+                        forecastElement.innerHTML = '📈 Forecast: <strong>\$' + forecast.forecastTotal.toFixed(2) + '</strong> by month end<br/><span style="font-size: 12px;">(+\$' + increase.toFixed(2) + ', +' + increasePercent + '% from current)</span>';
+                        forecastElement.className = 'forecast';
+                        console.log('Forecast displayed');
+                    } else {
+                        forecastElement.innerHTML = '✅ Month complete';
+                        forecastElement.className = 'forecast';
+                        console.log('Month complete displayed');
+                    }
+                }
+            }
+
+            // Call toggleView to update table and ensure everything is in sync
+            toggleView(currentView);
         });
     </script>
 </body>
